@@ -22,6 +22,21 @@ public class NativeWebView : NativeControlHost, IDisposable
     private static readonly SolidColorBrush RenderBackgroundBrush = new(Color.FromRgb(15, 23, 42));
     private static readonly SolidColorBrush RenderOutlineBrush = new(Color.FromArgb(180, 148, 163, 184));
     private static readonly SolidColorBrush RenderTextBrush = new(Color.FromRgb(226, 232, 240));
+    private const string MacOsCompositedVideoPassthroughMessage =
+        "Video host detected. Using native passthrough in composited mode to preserve hardware-accelerated playback.";
+    private const string MacOsCompositedForcedPassthroughMessage =
+        "Manual override active. Native passthrough is forced in composited mode.";
+    private const string MacOsCompositedForcedDisabledMessage =
+        "Manual override active. Native passthrough is disabled in composited mode.";
+    private static readonly string[] MacOsCompositedPassthroughVideoHosts =
+    [
+        "youtube.com",
+        "youtu.be",
+        "vimeo.com",
+        "twitch.tv",
+        "dailymotion.com",
+        "netflix.com",
+    ];
 
     private readonly NativeWebViewController _controller;
     private readonly NativeWebViewRenderStatisticsTracker _renderStatisticsTracker = new();
@@ -35,6 +50,8 @@ public class NativeWebView : NativeControlHost, IDisposable
     private bool _isAttached;
     private bool _frameCaptureInProgress;
     private bool _isUsingSyntheticFrameSource;
+    private bool _isMacOsCompositedPassthroughActive;
+    private bool? _macOsCompositedPassthroughOverride;
     private string? _renderDiagnosticsMessage;
 
     public static readonly StyledProperty<NativeWebViewRenderMode> RenderModeProperty =
@@ -76,6 +93,8 @@ public class NativeWebView : NativeControlHost, IDisposable
     public string? RenderDiagnosticsMessage => _renderDiagnosticsMessage;
 
     public NativeWebViewRenderStatistics RenderStatistics => _renderStatisticsTracker.CreateSnapshot();
+
+    public bool? MacOsCompositedPassthroughOverride => _macOsCompositedPassthroughOverride;
 
     public Uri? Source
     {
@@ -279,6 +298,17 @@ public class NativeWebView : NativeControlHost, IDisposable
         _renderStatisticsTracker.Reset();
     }
 
+    public void SetCompositedPassthroughOverride(bool? enabled)
+    {
+        _macOsCompositedPassthroughOverride = enabled;
+        UpdateMacOsCompositedPassthroughPolicy();
+
+        if (RenderMode != NativeWebViewRenderMode.Embedded)
+        {
+            _ = CaptureAndRenderFrameAsync();
+        }
+    }
+
     public async Task<bool> SaveRenderFrameAsync(string outputPath, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
@@ -384,6 +414,7 @@ public class NativeWebView : NativeControlHost, IDisposable
         }
 
         _controller.Navigate(url);
+        UpdateMacOsCompositedPassthroughPolicy();
     }
 
     public void Navigate(Uri uri)
@@ -394,12 +425,14 @@ public class NativeWebView : NativeControlHost, IDisposable
         }
 
         _controller.Navigate(uri);
+        UpdateMacOsCompositedPassthroughPolicy();
     }
 
     public void Reload()
     {
         _macOSHost?.Reload();
         _controller.Reload();
+        UpdateMacOsCompositedPassthroughPolicy();
     }
 
     public void Stop()
@@ -412,12 +445,14 @@ public class NativeWebView : NativeControlHost, IDisposable
     {
         _macOSHost?.GoBack();
         _controller.GoBack();
+        UpdateMacOsCompositedPassthroughPolicy();
     }
 
     public void GoForward()
     {
         _macOSHost?.GoForward();
         _controller.GoForward();
+        UpdateMacOsCompositedPassthroughPolicy();
     }
 
     public Task<string?> ExecuteScriptAsync(string script, CancellationToken cancellationToken = default)
@@ -671,13 +706,17 @@ public class NativeWebView : NativeControlHost, IDisposable
     private void ApplyRenderModeState(bool forceRefresh)
     {
         ApplyRenderModeToNativeHost();
+        UpdateMacOsCompositedPassthroughPolicy();
         _macOSHost?.UpdateLayoutForCurrentMode();
 
         if (RenderMode == NativeWebViewRenderMode.Embedded)
         {
             StopFramePump();
             DisposeRenderSurfaces();
-            _renderDiagnosticsMessage = null;
+            if (!IsPassthroughDiagnosticsMessage(_renderDiagnosticsMessage))
+            {
+                _renderDiagnosticsMessage = null;
+            }
             _isUsingSyntheticFrameSource = false;
 
             if (forceRefresh)
@@ -1058,5 +1097,96 @@ public class NativeWebView : NativeControlHost, IDisposable
     {
         const double epsilon = 0.01;
         return Math.Abs(left.X - right.X) < epsilon && Math.Abs(left.Y - right.Y) < epsilon;
+    }
+
+    private void UpdateMacOsCompositedPassthroughPolicy()
+    {
+        if (_macOSHost is null || !OperatingSystem.IsMacOS())
+        {
+            _isMacOsCompositedPassthroughActive = false;
+            return;
+        }
+
+        var shouldEnable = ResolveMacOsCompositedPassthroughEnabled();
+
+        _macOSHost.SetCompositedPassthrough(shouldEnable);
+
+        if (_isMacOsCompositedPassthroughActive == shouldEnable)
+        {
+            return;
+        }
+
+        _isMacOsCompositedPassthroughActive = shouldEnable;
+        var passthroughDiagnostics = ResolvePassthroughDiagnosticsMessage(shouldEnable);
+        if (!string.IsNullOrWhiteSpace(passthroughDiagnostics))
+        {
+            _renderDiagnosticsMessage = passthroughDiagnostics;
+        }
+        else if (IsPassthroughDiagnosticsMessage(_renderDiagnosticsMessage))
+        {
+            _renderDiagnosticsMessage = null;
+        }
+    }
+
+    private bool ResolveMacOsCompositedPassthroughEnabled()
+    {
+        if (RenderMode == NativeWebViewRenderMode.Embedded)
+        {
+            return false;
+        }
+
+        if (_macOsCompositedPassthroughOverride.HasValue)
+        {
+            return _macOsCompositedPassthroughOverride.Value;
+        }
+
+        return IsKnownVideoHost(CurrentUrl);
+    }
+
+    private string? ResolvePassthroughDiagnosticsMessage(bool passthroughEnabled)
+    {
+        if (_macOsCompositedPassthroughOverride.HasValue)
+        {
+            return passthroughEnabled
+                ? MacOsCompositedForcedPassthroughMessage
+                : MacOsCompositedForcedDisabledMessage;
+        }
+
+        return passthroughEnabled
+            ? MacOsCompositedVideoPassthroughMessage
+            : null;
+    }
+
+    private static bool IsPassthroughDiagnosticsMessage(string? message)
+    {
+        return string.Equals(message, MacOsCompositedVideoPassthroughMessage, StringComparison.Ordinal) ||
+               string.Equals(message, MacOsCompositedForcedPassthroughMessage, StringComparison.Ordinal) ||
+               string.Equals(message, MacOsCompositedForcedDisabledMessage, StringComparison.Ordinal);
+    }
+
+    private static bool IsKnownVideoHost(Uri? uri)
+    {
+        if (uri is null || !uri.IsAbsoluteUri)
+        {
+            return false;
+        }
+
+        var host = uri.Host;
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return false;
+        }
+
+        for (var i = 0; i < MacOsCompositedPassthroughVideoHosts.Length; i++)
+        {
+            var videoHost = MacOsCompositedPassthroughVideoHosts[i];
+            if (host.Equals(videoHost, StringComparison.OrdinalIgnoreCase) ||
+                host.EndsWith($".{videoHost}", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

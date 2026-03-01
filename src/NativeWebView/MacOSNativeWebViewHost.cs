@@ -56,6 +56,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
     private bool _disposed;
     private NativeWebViewRenderMode _renderMode = NativeWebViewRenderMode.Embedded;
+    private bool _compositedPassthroughEnabled;
     private int _capturePixelWidth = 1;
     private int _capturePixelHeight = 1;
     private long _captureFrameSequence;
@@ -122,11 +123,22 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             // AppKit skips hit-testing for near-zero alpha values; keep a faint overlay so
             // mouse/keyboard continue to target the WKWebView in composited modes.
             ObjC.SendVoidByte(ViewHandle, SelSetHidden, 0);
-            ObjC.SendVoidDouble(ViewHandle, SelSetAlphaValue, CompositedOverlayAlpha);
+            ObjC.SendVoidDouble(ViewHandle, SelSetAlphaValue, ResolveCompositedOverlayAlpha());
             TryMakeFirstResponder();
         }
 
         UpdateLayoutForCurrentMode();
+    }
+
+    public void SetCompositedPassthrough(bool enabled)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        _compositedPassthroughEnabled = enabled;
+        if (_renderMode != NativeWebViewRenderMode.Embedded && ViewHandle != IntPtr.Zero)
+        {
+            ObjC.SendVoidDouble(ViewHandle, SelSetAlphaValue, ResolveCompositedOverlayAlpha());
+        }
     }
 
     public void SetCaptureSize(int pixelWidth, int pixelHeight)
@@ -252,7 +264,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
             if (restoreOverlayAlpha)
             {
-                ObjC.SendVoidDouble(ViewHandle, SelSetAlphaValue, CompositedOverlayAlpha);
+                ObjC.SendVoidDouble(ViewHandle, SelSetAlphaValue, ResolveCompositedOverlayAlpha());
             }
 
             return true;
@@ -269,7 +281,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             }
             else
             {
-                ObjC.SendVoidDouble(ViewHandle, SelSetAlphaValue, CompositedOverlayAlpha);
+                ObjC.SendVoidDouble(ViewHandle, SelSetAlphaValue, ResolveCompositedOverlayAlpha());
             }
         }
     }
@@ -449,6 +461,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         }
 
         _ = ObjC.SendBoolIntPtr(window, SelMakeFirstResponder, ViewHandle);
+    }
+
+    private double ResolveCompositedOverlayAlpha()
+    {
+        return _compositedPassthroughEnabled ? 1d : CompositedOverlayAlpha;
     }
 
     private static IntPtr CreateNSStringBackedObject(IntPtr classHandle, IntPtr selector, string value)
