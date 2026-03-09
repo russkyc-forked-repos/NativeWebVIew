@@ -6,9 +6,15 @@ internal static class BrowserPlatformDiagnostics
 {
     public static NativeWebViewPlatformDiagnostics Create()
     {
-        var issues = new List<NativeWebViewDiagnosticIssue>();
+        return Create(
+            NativeWebViewDiagnosticsHostPlatformOverride.IsEffectiveHostPlatform(NativeWebViewPlatform.Browser),
+            Environment.GetEnvironmentVariable("NATIVEWEBVIEW_BROWSER_POPUP_SUPPORT"));
+    }
 
-        if (!NativeWebViewDiagnosticsHostPlatformOverride.IsEffectiveHostPlatform(NativeWebViewPlatform.Browser))
+    internal static NativeWebViewPlatformDiagnostics Create(bool isBrowserHost, string? popupSupport)
+    {
+        var issues = new List<NativeWebViewDiagnosticIssue>();
+        if (!isBrowserHost)
         {
             issues.Add(new NativeWebViewDiagnosticIssue(
                 code: "browser.host.mismatch",
@@ -16,16 +22,17 @@ internal static class BrowserPlatformDiagnostics
                 message: "Browser backend diagnostics are running on a non-browser host.",
                 recommendation: "Run this diagnostic in WASM/browser runtime for accurate validation."));
         }
-
-        var popupSupport = Environment.GetEnvironmentVariable("NATIVEWEBVIEW_BROWSER_POPUP_SUPPORT");
-        if (string.Equals(popupSupport, "0", StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(popupSupport, "false", StringComparison.OrdinalIgnoreCase))
+        else
         {
-            issues.Add(new NativeWebViewDiagnosticIssue(
-                code: "browser.popup.disabled",
-                severity: NativeWebViewDiagnosticSeverity.Warning,
-                message: "Popup support is marked as disabled.",
-                recommendation: "Enable window.open/popups for interactive auth flows."));
+            if (string.Equals(popupSupport, "0", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(popupSupport, "false", StringComparison.OrdinalIgnoreCase))
+            {
+                issues.Add(new NativeWebViewDiagnosticIssue(
+                    code: "browser.popup.disabled",
+                    severity: NativeWebViewDiagnosticSeverity.Warning,
+                    message: "Popup support is marked as disabled.",
+                    recommendation: "Enable window.open/popups for interactive auth flows."));
+            }
         }
 
         if (issues.Count == 0)
