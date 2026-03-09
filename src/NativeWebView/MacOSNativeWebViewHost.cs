@@ -10,49 +10,49 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private const nuint NSViewWidthSizable = 1u << 1;
     private const nuint NSViewHeightSizable = 1u << 4;
 
-    private static IntPtr NSStringClass => ObjC.GetClass("NSString");
-    private static IntPtr NSURLClass => ObjC.GetClass("NSURL");
-    private static IntPtr NSURLRequestClass => ObjC.GetClass("NSURLRequest");
-    private static IntPtr WKWebViewClass => ObjC.GetClass("WKWebView");
-    private static IntPtr WKWebViewConfigurationClass => ObjC.GetClass("WKWebViewConfiguration");
+    private static IntPtr NSStringClass => GetClass("NSString");
+    private static IntPtr NSURLClass => GetClass("NSURL");
+    private static IntPtr NSURLRequestClass => GetClass("NSURLRequest");
+    private static IntPtr WKWebViewClass => GetClass("WKWebView");
+    private static IntPtr WKWebViewConfigurationClass => GetClass("WKWebViewConfiguration");
 
-    private static readonly IntPtr SelAlloc = ObjC.GetSelector("alloc");
-    private static readonly IntPtr SelInit = ObjC.GetSelector("init");
-    private static readonly IntPtr SelRelease = ObjC.GetSelector("release");
-    private static readonly IntPtr SelRemoveFromSuperview = ObjC.GetSelector("removeFromSuperview");
-    private static readonly IntPtr SelAddSubview = ObjC.GetSelector("addSubview:");
-    private static readonly IntPtr SelSetAutoresizingMask = ObjC.GetSelector("setAutoresizingMask:");
-    private static readonly IntPtr SelBounds = ObjC.GetSelector("bounds");
-    private static readonly IntPtr SelStringWithUtf8String = ObjC.GetSelector("stringWithUTF8String:");
-    private static readonly IntPtr SelUrlWithString = ObjC.GetSelector("URLWithString:");
-    private static readonly IntPtr SelRequestWithUrl = ObjC.GetSelector("requestWithURL:");
-    private static readonly IntPtr SelInitWithFrameConfiguration = ObjC.GetSelector("initWithFrame:configuration:");
-    private static readonly IntPtr SelLoadRequest = ObjC.GetSelector("loadRequest:");
-    private static readonly IntPtr SelReload = ObjC.GetSelector("reload");
-    private static readonly IntPtr SelStopLoading = ObjC.GetSelector("stopLoading");
-    private static readonly IntPtr SelGoBack = ObjC.GetSelector("goBack");
-    private static readonly IntPtr SelGoForward = ObjC.GetSelector("goForward");
-    private static readonly IntPtr SelSetCustomUserAgent = ObjC.GetSelector("setCustomUserAgent:");
-    private static readonly IntPtr SelRespondsToSelector = ObjC.GetSelector("respondsToSelector:");
-    private static readonly IntPtr SelSetPageZoom = ObjC.GetSelector("setPageZoom:");
-    private static readonly IntPtr SelPrint = ObjC.GetSelector("print:");
-    private static readonly IntPtr SelDataWithPdfInsideRect = ObjC.GetSelector("dataWithPDFInsideRect:");
-    private static readonly IntPtr SelWriteToFileAtomically = ObjC.GetSelector("writeToFile:atomically:");
-    private static readonly IntPtr SelSetHidden = ObjC.GetSelector("setHidden:");
-    private static readonly IntPtr SelSetNeedsDisplay = ObjC.GetSelector("setNeedsDisplay:");
-    private static readonly IntPtr SelDisplayIfNeeded = ObjC.GetSelector("displayIfNeeded");
-    private static readonly IntPtr SelSetFrame = ObjC.GetSelector("setFrame:");
-    private static readonly IntPtr SelSetAlphaValue = ObjC.GetSelector("setAlphaValue:");
-    private static readonly IntPtr SelSuperview = ObjC.GetSelector("superview");
-    private static readonly IntPtr SelWindow = ObjC.GetSelector("window");
-    private static readonly IntPtr SelMakeFirstResponder = ObjC.GetSelector("makeFirstResponder:");
-    private static readonly IntPtr SelBackingScaleFactor = ObjC.GetSelector("backingScaleFactor");
-    private static readonly IntPtr SelBitmapImageRepForCachingDisplayInRect = ObjC.GetSelector("bitmapImageRepForCachingDisplayInRect:");
-    private static readonly IntPtr SelCacheDisplayInRectToBitmapImageRep = ObjC.GetSelector("cacheDisplayInRect:toBitmapImageRep:");
-    private static readonly IntPtr SelBitmapData = ObjC.GetSelector("bitmapData");
-    private static readonly IntPtr SelBytesPerRow = ObjC.GetSelector("bytesPerRow");
-    private static readonly IntPtr SelPixelsWide = ObjC.GetSelector("pixelsWide");
-    private static readonly IntPtr SelPixelsHigh = ObjC.GetSelector("pixelsHigh");
+    private static IntPtr SelAlloc => GetSelector("alloc");
+    private static IntPtr SelInit => GetSelector("init");
+    private static IntPtr SelRelease => GetSelector("release");
+    private static IntPtr SelRemoveFromSuperview => GetSelector("removeFromSuperview");
+    private static IntPtr SelAddSubview => GetSelector("addSubview:");
+    private static IntPtr SelSetAutoresizingMask => GetSelector("setAutoresizingMask:");
+    private static IntPtr SelBounds => GetSelector("bounds");
+    private static IntPtr SelStringWithUtf8String => GetSelector("stringWithUTF8String:");
+    private static IntPtr SelUrlWithString => GetSelector("URLWithString:");
+    private static IntPtr SelRequestWithUrl => GetSelector("requestWithURL:");
+    private static IntPtr SelInitWithFrameConfiguration => GetSelector("initWithFrame:configuration:");
+    private static IntPtr SelLoadRequest => GetSelector("loadRequest:");
+    private static IntPtr SelReload => GetSelector("reload");
+    private static IntPtr SelStopLoading => GetSelector("stopLoading");
+    private static IntPtr SelGoBack => GetSelector("goBack");
+    private static IntPtr SelGoForward => GetSelector("goForward");
+    private static IntPtr SelSetCustomUserAgent => GetSelector("setCustomUserAgent:");
+    private static IntPtr SelRespondsToSelector => GetSelector("respondsToSelector:");
+    private static IntPtr SelSetPageZoom => GetSelector("setPageZoom:");
+    private static IntPtr SelPrint => GetSelector("print:");
+    private static IntPtr SelDataWithPdfInsideRect => GetSelector("dataWithPDFInsideRect:");
+    private static IntPtr SelWriteToFileAtomically => GetSelector("writeToFile:atomically:");
+    private static IntPtr SelSetHidden => GetSelector("setHidden:");
+    private static IntPtr SelSetNeedsDisplay => GetSelector("setNeedsDisplay:");
+    private static IntPtr SelDisplayIfNeeded => GetSelector("displayIfNeeded");
+    private static IntPtr SelSetFrame => GetSelector("setFrame:");
+    private static IntPtr SelSetAlphaValue => GetSelector("setAlphaValue:");
+    private static IntPtr SelSuperview => GetSelector("superview");
+    private static IntPtr SelWindow => GetSelector("window");
+    private static IntPtr SelMakeFirstResponder => GetSelector("makeFirstResponder:");
+    private static IntPtr SelBackingScaleFactor => GetSelector("backingScaleFactor");
+    private static IntPtr SelBitmapImageRepForCachingDisplayInRect => GetSelector("bitmapImageRepForCachingDisplayInRect:");
+    private static IntPtr SelCacheDisplayInRectToBitmapImageRep => GetSelector("cacheDisplayInRect:toBitmapImageRep:");
+    private static IntPtr SelBitmapData => GetSelector("bitmapData");
+    private static IntPtr SelBytesPerRow => GetSelector("bytesPerRow");
+    private static IntPtr SelPixelsWide => GetSelector("pixelsWide");
+    private static IntPtr SelPixelsHigh => GetSelector("pixelsHigh");
 
     private bool _disposed;
     private NativeWebViewRenderMode _renderMode = NativeWebViewRenderMode.Embedded;
@@ -60,6 +60,20 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private int _capturePixelWidth = 1;
     private int _capturePixelHeight = 1;
     private long _captureFrameSequence;
+
+    private static IntPtr GetClass(string name)
+    {
+        return OperatingSystem.IsMacOS()
+            ? ObjC.GetClass(name)
+            : IntPtr.Zero;
+    }
+
+    private static IntPtr GetSelector(string name)
+    {
+        return OperatingSystem.IsMacOS()
+            ? ObjC.GetSelector(name)
+            : IntPtr.Zero;
+    }
 
     public MacOSNativeWebViewHost(IPlatformHandle parent)
     {

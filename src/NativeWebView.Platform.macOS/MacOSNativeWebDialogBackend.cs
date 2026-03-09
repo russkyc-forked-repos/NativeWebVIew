@@ -18,46 +18,46 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
     private static readonly NativePlatformHandle PlaceholderDialogHandle = new((nint)0x2102, "WKWebView");
     private static readonly NativePlatformHandle PlaceholderHostWindowHandle = new((nint)0x2103, "NSWindow");
 
-    private static IntPtr NSStringClass => ObjC.GetClass("NSString");
-    private static IntPtr NSURLClass => ObjC.GetClass("NSURL");
-    private static IntPtr NSURLRequestClass => ObjC.GetClass("NSURLRequest");
-    private static IntPtr NSWindowClass => ObjC.GetClass("NSWindow");
-    private static IntPtr WKWebViewClass => ObjC.GetClass("WKWebView");
-    private static IntPtr WKWebViewConfigurationClass => ObjC.GetClass("WKWebViewConfiguration");
+    private static IntPtr NSStringClass => GetClass("NSString");
+    private static IntPtr NSURLClass => GetClass("NSURL");
+    private static IntPtr NSURLRequestClass => GetClass("NSURLRequest");
+    private static IntPtr NSWindowClass => GetClass("NSWindow");
+    private static IntPtr WKWebViewClass => GetClass("WKWebView");
+    private static IntPtr WKWebViewConfigurationClass => GetClass("WKWebViewConfiguration");
 
-    private static readonly IntPtr SelAlloc = ObjC.GetSelector("alloc");
-    private static readonly IntPtr SelInit = ObjC.GetSelector("init");
-    private static readonly IntPtr SelRelease = ObjC.GetSelector("release");
-    private static readonly IntPtr SelStringWithUtf8String = ObjC.GetSelector("stringWithUTF8String:");
-    private static readonly IntPtr SelUrlWithString = ObjC.GetSelector("URLWithString:");
-    private static readonly IntPtr SelRequestWithUrl = ObjC.GetSelector("requestWithURL:");
-    private static readonly IntPtr SelInitWithContentRectStyleMaskBackingDefer = ObjC.GetSelector("initWithContentRect:styleMask:backing:defer:");
-    private static readonly IntPtr SelSetReleasedWhenClosed = ObjC.GetSelector("setReleasedWhenClosed:");
-    private static readonly IntPtr SelSetTitle = ObjC.GetSelector("setTitle:");
-    private static readonly IntPtr SelCenter = ObjC.GetSelector("center");
-    private static readonly IntPtr SelMakeKeyAndOrderFront = ObjC.GetSelector("makeKeyAndOrderFront:");
-    private static readonly IntPtr SelClose = ObjC.GetSelector("close");
-    private static readonly IntPtr SelIsVisible = ObjC.GetSelector("isVisible");
-    private static readonly IntPtr SelSetFrameOrigin = ObjC.GetSelector("setFrameOrigin:");
-    private static readonly IntPtr SelSetContentSize = ObjC.GetSelector("setContentSize:");
-    private static readonly IntPtr SelContentView = ObjC.GetSelector("contentView");
-    private static readonly IntPtr SelSetFrame = ObjC.GetSelector("setFrame:");
-    private static readonly IntPtr SelAddSubview = ObjC.GetSelector("addSubview:");
-    private static readonly IntPtr SelRemoveFromSuperview = ObjC.GetSelector("removeFromSuperview");
-    private static readonly IntPtr SelSetAutoresizingMask = ObjC.GetSelector("setAutoresizingMask:");
-    private static readonly IntPtr SelInitWithFrameConfiguration = ObjC.GetSelector("initWithFrame:configuration:");
-    private static readonly IntPtr SelLoadRequest = ObjC.GetSelector("loadRequest:");
-    private static readonly IntPtr SelReload = ObjC.GetSelector("reload");
-    private static readonly IntPtr SelStopLoading = ObjC.GetSelector("stopLoading");
-    private static readonly IntPtr SelGoBack = ObjC.GetSelector("goBack");
-    private static readonly IntPtr SelGoForward = ObjC.GetSelector("goForward");
-    private static readonly IntPtr SelSetCustomUserAgent = ObjC.GetSelector("setCustomUserAgent:");
-    private static readonly IntPtr SelRespondsToSelector = ObjC.GetSelector("respondsToSelector:");
-    private static readonly IntPtr SelSetPageZoom = ObjC.GetSelector("setPageZoom:");
-    private static readonly IntPtr SelPrint = ObjC.GetSelector("print:");
-    private static readonly IntPtr SelBounds = ObjC.GetSelector("bounds");
-    private static readonly IntPtr SelDataWithPdfInsideRect = ObjC.GetSelector("dataWithPDFInsideRect:");
-    private static readonly IntPtr SelWriteToFileAtomically = ObjC.GetSelector("writeToFile:atomically:");
+    private static IntPtr SelAlloc => GetSelector("alloc");
+    private static IntPtr SelInit => GetSelector("init");
+    private static IntPtr SelRelease => GetSelector("release");
+    private static IntPtr SelStringWithUtf8String => GetSelector("stringWithUTF8String:");
+    private static IntPtr SelUrlWithString => GetSelector("URLWithString:");
+    private static IntPtr SelRequestWithUrl => GetSelector("requestWithURL:");
+    private static IntPtr SelInitWithContentRectStyleMaskBackingDefer => GetSelector("initWithContentRect:styleMask:backing:defer:");
+    private static IntPtr SelSetReleasedWhenClosed => GetSelector("setReleasedWhenClosed:");
+    private static IntPtr SelSetTitle => GetSelector("setTitle:");
+    private static IntPtr SelCenter => GetSelector("center");
+    private static IntPtr SelMakeKeyAndOrderFront => GetSelector("makeKeyAndOrderFront:");
+    private static IntPtr SelClose => GetSelector("close");
+    private static IntPtr SelIsVisible => GetSelector("isVisible");
+    private static IntPtr SelSetFrameOrigin => GetSelector("setFrameOrigin:");
+    private static IntPtr SelSetContentSize => GetSelector("setContentSize:");
+    private static IntPtr SelContentView => GetSelector("contentView");
+    private static IntPtr SelSetFrame => GetSelector("setFrame:");
+    private static IntPtr SelAddSubview => GetSelector("addSubview:");
+    private static IntPtr SelRemoveFromSuperview => GetSelector("removeFromSuperview");
+    private static IntPtr SelSetAutoresizingMask => GetSelector("setAutoresizingMask:");
+    private static IntPtr SelInitWithFrameConfiguration => GetSelector("initWithFrame:configuration:");
+    private static IntPtr SelLoadRequest => GetSelector("loadRequest:");
+    private static IntPtr SelReload => GetSelector("reload");
+    private static IntPtr SelStopLoading => GetSelector("stopLoading");
+    private static IntPtr SelGoBack => GetSelector("goBack");
+    private static IntPtr SelGoForward => GetSelector("goForward");
+    private static IntPtr SelSetCustomUserAgent => GetSelector("setCustomUserAgent:");
+    private static IntPtr SelRespondsToSelector => GetSelector("respondsToSelector:");
+    private static IntPtr SelSetPageZoom => GetSelector("setPageZoom:");
+    private static IntPtr SelPrint => GetSelector("print:");
+    private static IntPtr SelBounds => GetSelector("bounds");
+    private static IntPtr SelDataWithPdfInsideRect => GetSelector("dataWithPDFInsideRect:");
+    private static IntPtr SelWriteToFileAtomically => GetSelector("writeToFile:atomically:");
 
     private readonly List<Uri> _history = [];
     private readonly bool _useNative;
@@ -69,6 +69,20 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
     private IntPtr _contentViewHandle;
     private IntPtr _webViewHandle;
     private IntPtr _configurationHandle;
+
+    private static IntPtr GetClass(string name)
+    {
+        return OperatingSystem.IsMacOS()
+            ? ObjC.GetClass(name)
+            : IntPtr.Zero;
+    }
+
+    private static IntPtr GetSelector(string name)
+    {
+        return OperatingSystem.IsMacOS()
+            ? ObjC.GetSelector(name)
+            : IntPtr.Zero;
+    }
 
     public MacOSNativeWebDialogBackend()
     {
