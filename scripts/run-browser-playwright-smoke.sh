@@ -2,7 +2,7 @@
 set -euo pipefail
 
 python_bin="python3"
-venv_dir=".venv-docs"
+venv_dir=""
 install_browsers=true
 
 while [[ $# -gt 0 ]]; do
@@ -26,13 +26,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-"$python_bin" -m venv "$venv_dir"
-# shellcheck disable=SC1090
-. "$venv_dir/bin/activate"
+if [[ -n "$venv_dir" && "$python_bin" == "python3" ]]; then
+  candidate_python="$venv_dir/bin/python"
+  if [[ -x "$candidate_python" ]]; then
+    python_bin="$candidate_python"
+  fi
+fi
 
-python -m pip install --upgrade pip
-pip install -r docs/requirements.txt
-mkdocs build --strict
+if ! command -v "$python_bin" >/dev/null 2>&1 && [[ ! -x "$python_bin" ]]; then
+  echo "Python runtime not found: $python_bin" >&2
+  exit 1
+fi
+
+dotnet tool restore
+(
+  cd site
+  dotnet tool run lunet --stacktrace build --dev
+)
+
+export NATIVEWEBVIEW_DOCS_PYTHON_BIN="$python_bin"
 
 npm ci --prefix tests/NativeWebView.Playwright
 if [[ "$install_browsers" == "true" ]]; then

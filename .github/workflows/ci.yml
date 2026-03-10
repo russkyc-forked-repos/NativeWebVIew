@@ -42,6 +42,39 @@ jobs:
       - name: Validate changelog fragments
         run: ./scripts/validate-changelog-fragments.sh
 
+  docs:
+    name: Docs
+    needs: quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.x
+            8.0.x
+
+      - name: Restore local tools
+        run: dotnet tool restore
+
+      - name: Build docs
+        run: |
+          chmod +x check-docs.sh
+          ./check-docs.sh
+
+      - name: Upload docs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docs-site
+          if-no-files-found: error
+          path: |
+            site/.lunet/build/www
+
   build-test:
     name: Build & Test (${{ matrix.os }})
     needs: quality
