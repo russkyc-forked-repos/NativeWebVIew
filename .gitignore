@@ -332,7 +332,7 @@ paket-files/
 __pycache__/
 *.pyc
 .venv-docs/
-site/
+site/.lunet/build/
 
 # Cake - Uncomment if you are using it
 # tools/**
