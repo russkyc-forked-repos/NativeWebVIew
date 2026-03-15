@@ -1,4 +1,5 @@
 using NativeWebView.Core;
+using NativeWebView.Interop;
 using NativeWebView.Platform.Android;
 using NativeWebView.Platform.Browser;
 using NativeWebView.Platform.Windows;
@@ -56,6 +57,34 @@ public sealed class BackendFactoryAndCapabilityTests
 
         Assert.Equal(1, environmentRequestedCount);
         Assert.Equal(1, controllerRequestedCount);
+    }
+
+    [Fact]
+    public void BrowserBackend_ExposesDistinctSyntheticHandlesPerInstance()
+    {
+        var factory = new NativeWebViewBackendFactory();
+        factory.UseNativeWebViewBrowser();
+
+        Assert.True(factory.TryCreateNativeWebViewBackend(NativeWebViewPlatform.Browser, out var firstBackend));
+        Assert.True(factory.TryCreateNativeWebViewBackend(NativeWebViewPlatform.Browser, out var secondBackend));
+
+        using (firstBackend)
+        using (secondBackend)
+        {
+            var firstProvider = Assert.IsAssignableFrom<INativeWebViewPlatformHandleProvider>(firstBackend);
+            var secondProvider = Assert.IsAssignableFrom<INativeWebViewPlatformHandleProvider>(secondBackend);
+
+            Assert.True(firstProvider.TryGetPlatformHandle(out var firstPlatformHandle));
+            Assert.True(firstProvider.TryGetViewHandle(out var firstViewHandle));
+            Assert.True(firstProvider.TryGetControllerHandle(out var firstControllerHandle));
+            Assert.True(secondProvider.TryGetPlatformHandle(out var secondPlatformHandle));
+            Assert.True(secondProvider.TryGetViewHandle(out var secondViewHandle));
+            Assert.True(secondProvider.TryGetControllerHandle(out var secondControllerHandle));
+
+            Assert.NotEqual(firstPlatformHandle.Handle, secondPlatformHandle.Handle);
+            Assert.NotEqual(firstViewHandle.Handle, secondViewHandle.Handle);
+            Assert.NotEqual(firstControllerHandle.Handle, secondControllerHandle.Handle);
+        }
     }
 
     [Fact]
