@@ -78,11 +78,22 @@ if (!factory.TryCreateNativeWebViewBackend(NativeWebViewPlatform.Windows, out va
 }
 
 using var webView = new NativeWebView(backend);
+webView.InstanceConfiguration.EnvironmentOptions.UserDataFolder = "./artifacts/example-userdata";
+webView.InstanceConfiguration.EnvironmentOptions.CacheFolder = "./artifacts/example-cache";
+webView.InstanceConfiguration.EnvironmentOptions.Proxy = new NativeWebViewProxyOptions
+{
+    Server = "http://localhost:8888"
+};
+webView.InstanceConfiguration.ControllerOptions.ProfileName = "example-profile";
 await webView.InitializeAsync();
 webView.RenderMode = NativeWebViewRenderMode.GpuSurface;
 webView.RenderFramesPerSecond = 30;
 webView.Navigate("https://example.com");
 ```
+
+Each `NativeWebView` control instance keeps its own `InstanceConfiguration`, so multiple hosted views can use different proxy, cache, cookie, session, and profile settings in the same process.
+
+Per-instance proxy application is currently effective on macOS 14+ for the embedded `NativeWebView` control and `NativeWebDialog`. Windows, Linux, iOS, Android, and Browser continue to expose the configuration contract, but the current repo backends for those targets do not yet apply it at runtime. The macOS implementation currently supports explicit `http`, `https`, and `socks5` proxy servers plus bypass domains, and uses a dedicated persistent `WKWebsiteDataStore` identity derived from the instance configuration so proxied views do not fall back to private-browsing storage semantics. PAC (`AutoConfigUrl`) is not applied.
 
 ## Rendering Modes
 
