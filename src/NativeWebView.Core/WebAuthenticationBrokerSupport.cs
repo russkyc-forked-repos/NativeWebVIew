@@ -203,8 +203,18 @@ internal static class WebAuthenticationBrokerBackendSupport
                 CenterOnParent = true,
             });
 
+            // Force runtime initialization to complete or fail before the auth flow waits on navigation events.
+            await dialogBackend.ExecuteScriptAsync("void 0", cancellationToken).ConfigureAwait(false);
             dialogBackend.Navigate(requestUri);
             return await completion.Task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return RuntimeUnavailable();
         }
         finally
         {

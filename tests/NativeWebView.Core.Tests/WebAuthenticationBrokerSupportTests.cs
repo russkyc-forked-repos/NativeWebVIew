@@ -86,6 +86,40 @@ public sealed class WebAuthenticationBrokerSupportTests
     }
 
     [Fact]
+    public async Task AuthenticateWithDialogAsync_ReturnsRuntimeUnavailable_WhenDialogInitializationFails()
+    {
+        var backend = new TestDialogBackend(
+            executeScriptHandler: static (_, _) => throw new InvalidOperationException("init failed"));
+
+        var result = await WebAuthenticationBrokerBackendSupport.AuthenticateWithDialogAsync(
+            backend,
+            new Uri("https://example.com/auth"),
+            new Uri("https://example.com/callback"));
+
+        Assert.Equal(WebAuthenticationStatus.ErrorHttp, result.ResponseStatus);
+        Assert.Equal(WebAuthenticationBrokerBackendSupport.NotImplementedError, result.ResponseErrorDetail);
+        Assert.True(backend.ShowCalled);
+        Assert.True(backend.DisposeCalled);
+    }
+
+    [Theory]
+    [InlineData("https://app.example.com/callback", "https://app.example.com", true)]
+    [InlineData("https://app.example.com/callback", "https://other.example.com", false)]
+    [InlineData("http://app.example.com/callback", "http://app.example.com", true)]
+    [InlineData("custom://callback", "https://app.example.com", false)]
+    public void BrowserInspectableHttpCallback_RequiresReadableOrigin(
+        string callback,
+        string inspectableOrigin,
+        bool expected)
+    {
+        var result = BrowserWebAuthenticationBrokerBackend.IsInspectableHttpCallback(
+            new Uri(callback),
+            new Uri(inspectableOrigin));
+
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
     public async Task InteractivePlatformBackends_ReturnError_WhenRuntimeIsUnavailable()
     {
         var requestUri = new Uri("https://example.com/auth");
@@ -126,10 +160,14 @@ public sealed class WebAuthenticationBrokerSupportTests
     private sealed class TestDialogBackend : INativeWebDialogBackend
     {
         private readonly Action<TestDialogBackend, Uri>? _navigateHandler;
+        private readonly Func<string, CancellationToken, Task<string?>>? _executeScriptHandler;
 
-        public TestDialogBackend(Action<TestDialogBackend, Uri>? navigateHandler = null)
+        public TestDialogBackend(
+            Action<TestDialogBackend, Uri>? navigateHandler = null,
+            Func<string, CancellationToken, Task<string?>>? executeScriptHandler = null)
         {
             _navigateHandler = navigateHandler;
+            _executeScriptHandler = executeScriptHandler;
             Platform = NativeWebViewPlatform.Windows;
             Features = new WebViewPlatformFeatures(
                 NativeWebViewPlatform.Windows,
@@ -250,8 +288,14 @@ public sealed class WebAuthenticationBrokerSupportTests
 
         public Task<string?> ExecuteScriptAsync(string script, CancellationToken cancellationToken = default)
         {
-            _ = script;
             cancellationToken.ThrowIfCancellationRequested();
+
+            if (_executeScriptHandler is not null)
+            {
+                return _executeScriptHandler(script, cancellationToken);
+            }
+
+            _ = script;
             return Task.FromResult<string?>("null");
         }
 

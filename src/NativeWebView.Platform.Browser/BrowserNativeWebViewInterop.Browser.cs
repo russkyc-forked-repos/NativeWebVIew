@@ -345,6 +345,15 @@ internal static partial class BrowserNativeWebViewInterop
               } catch (error) {
                 return null;
               }
+            },
+            getHostOrigin: () => {
+              try {
+                return globalThis.location && globalThis.location.origin
+                  ? globalThis.location.origin
+                  : "";
+              } catch (error) {
+                return "";
+              }
             }
           };
         })();
@@ -420,4 +429,7 @@ internal static partial class BrowserNativeWebViewInterop
 
     [JSImport("globalThis.__nativeWebViewBrowser.getPopupUrl")]
     public static partial string? GetPopupUrl(JSObject popup);
+
+    [JSImport("globalThis.__nativeWebViewBrowser.getHostOrigin")]
+    public static partial string? GetHostOrigin();
 }

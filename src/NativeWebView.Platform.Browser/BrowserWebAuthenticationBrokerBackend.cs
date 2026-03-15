@@ -42,7 +42,7 @@ public sealed class BrowserWebAuthenticationBrokerBackend : IWebAuthenticationBr
             return WebAuthenticationResult.UserCancel();
         }
 
-        if ((options & WebAuthenticationOptions.UseHttpPost) != 0 || !IsInspectableHttpCallback(callbackUri))
+        if ((options & WebAuthenticationOptions.UseHttpPost) != 0)
         {
             return WebAuthenticationBrokerBackendSupport.UnsupportedHttpPost();
         }
@@ -51,6 +51,11 @@ public sealed class BrowserWebAuthenticationBrokerBackend : IWebAuthenticationBr
         if (OperatingSystem.IsBrowser())
         {
             BrowserNativeWebViewInterop.EnsureInstalled();
+            var hostOrigin = TryGetHostOrigin();
+            if (!IsInspectableHttpCallback(callbackUri, hostOrigin))
+            {
+                return WebAuthenticationBrokerBackendSupport.RuntimeUnavailable();
+            }
 
             JSObject? popup = null;
             try
@@ -103,6 +108,11 @@ public sealed class BrowserWebAuthenticationBrokerBackend : IWebAuthenticationBr
         }
 #endif
 
+        if (!IsInspectableHttpCallback(callbackUri, inspectableOrigin: null))
+        {
+            return WebAuthenticationBrokerBackendSupport.UnsupportedHttpPost();
+        }
+
         return WebAuthenticationBrokerBackendSupport.RuntimeUnavailable();
     }
 
@@ -110,10 +120,38 @@ public sealed class BrowserWebAuthenticationBrokerBackend : IWebAuthenticationBr
     {
     }
 
-    private static bool IsInspectableHttpCallback(Uri callbackUri)
+    internal static bool IsInspectableHttpCallback(Uri callbackUri, Uri? inspectableOrigin)
     {
-        return callbackUri.IsAbsoluteUri &&
-            (string.Equals(callbackUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(callbackUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase));
+        if (!callbackUri.IsAbsoluteUri ||
+            (!string.Equals(callbackUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) &&
+             !string.Equals(callbackUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        if (inspectableOrigin is null)
+        {
+            return true;
+        }
+
+        return Uri.Compare(
+            callbackUri,
+            inspectableOrigin,
+            UriComponents.SchemeAndServer,
+            UriFormat.SafeUnescaped,
+            StringComparison.OrdinalIgnoreCase) == 0;
+    }
+
+    private static Uri? TryGetHostOrigin()
+    {
+#if NATIVEWEBVIEW_BROWSER_RUNTIME
+        var origin = BrowserNativeWebViewInterop.GetHostOrigin();
+        if (Uri.TryCreate(origin, UriKind.Absolute, out var uri))
+        {
+            return uri;
+        }
+#endif
+
+        return null;
     }
 }
