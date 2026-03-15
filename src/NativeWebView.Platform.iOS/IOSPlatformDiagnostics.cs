@@ -48,8 +48,8 @@ internal static class IOSPlatformDiagnostics
             issues.Add(new NativeWebViewDiagnosticIssue(
                 code: "ios.control.contract_only",
                 severity: NativeWebViewDiagnosticSeverity.Warning,
-                message: "iOS currently registers the NativeWebView control contract, but the embedded control runtime is not implemented in this repo yet.",
-                recommendation: "Treat iOS embedded control support as planned work and check NativeWebViewPlatformImplementationStatusMatrix before shipping."));
+                message: "iOS currently registers the NativeWebView control contract, but this build does not include the Apple-workload-targeted embedded control runtime.",
+                recommendation: "Build the iOS-targeted backend assembly and check NativeWebViewPlatformImplementationStatusMatrix before shipping embedded control support."));
         }
     }
 }

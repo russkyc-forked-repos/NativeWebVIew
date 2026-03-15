@@ -699,6 +699,10 @@ public sealed class LinuxNativeWebViewBackend
                 CreateHostWindowOnGtkThread,
                 CancellationToken.None).GetAwaiter().GetResult();
 
+            LinuxGtkDispatcher.InvokeAsync(
+                () => LinuxNativeInterop.AttachX11WindowToParent(hostHandle.Xid, parentHandle.Handle),
+                CancellationToken.None).GetAwaiter().GetResult();
+
             _parentWindowXid = parentHandle.Handle;
             _gtkWindow = hostHandle.GtkWindow;
             _hostWindowXid = hostHandle.Xid;

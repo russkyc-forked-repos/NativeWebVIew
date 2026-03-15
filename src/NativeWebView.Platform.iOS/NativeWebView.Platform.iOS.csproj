@@ -15,17 +15,26 @@
     <PackageTags>$(PackageTags);iOS;WKWebView;UIKit</PackageTags>
     <IsPackable>true</IsPackable>
     <DefineConstants>$(DefineConstants);NATIVEWEBVIEW_PLATFORM_IOS</DefineConstants>
+    <EmbeddedControlRuntimeImplemented>false</EmbeddedControlRuntimeImplemented>
+    <AuthenticationBrokerRuntimeImplemented>false</AuthenticationBrokerRuntimeImplemented>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(TargetFramework)' == 'net8.0-ios17.0'">
     <CheckEolTargetFramework>false</CheckEolTargetFramework>
     <CheckEolWorkloads>false</CheckEolWorkloads>
     <DefineConstants>$(DefineConstants);NATIVEWEBVIEW_IOS_RUNTIME</DefineConstants>
+    <EmbeddedControlRuntimeImplemented>true</EmbeddedControlRuntimeImplemented>
+    <AuthenticationBrokerRuntimeImplemented>true</AuthenticationBrokerRuntimeImplemented>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../NativeWebView.Core/NativeWebView.Core.csproj" />
     <ProjectReference Include="../NativeWebView.Interop/NativeWebView.Interop.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="NativeWebView.EmbeddedControlRuntime" Value="$(EmbeddedControlRuntimeImplemented)" />
+    <AssemblyMetadata Include="NativeWebView.AuthenticationBrokerRuntime" Value="$(AuthenticationBrokerRuntimeImplemented)" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net8.0-ios17.0'">

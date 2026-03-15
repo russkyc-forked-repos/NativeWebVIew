@@ -107,7 +107,7 @@ public sealed class PlatformDiagnosticsTests
     }
 
     [Fact]
-    public void ImplementedEmbeddedPlatforms_DoNotReportContractOnlyEmbeddedControlWarning()
+    public void EmbeddedControlContractOnlyWarning_MatchesImplementationStatus()
     {
         var platforms = new (NativeWebViewPlatform Platform, Action<NativeWebViewBackendFactory> Register, string IssueCode)[]
         {
@@ -125,7 +125,17 @@ public sealed class PlatformDiagnosticsTests
             register(factory);
 
             Assert.True(factory.TryGetPlatformDiagnostics(platform, out var diagnostics));
-            Assert.DoesNotContain(diagnostics.Issues, issue => issue.Code == issueCode);
+            var shouldWarn = NativeWebViewPlatformImplementationStatusMatrix.Get(platform).EmbeddedControl !=
+                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented;
+
+            if (shouldWarn)
+            {
+                Assert.Contains(diagnostics.Issues, issue => issue.Code == issueCode);
+            }
+            else
+            {
+                Assert.DoesNotContain(diagnostics.Issues, issue => issue.Code == issueCode);
+            }
         }
     }
 }

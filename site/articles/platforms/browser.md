@@ -12,9 +12,9 @@ title: "Browser"
 
 ## Current Repo Implementation Status
 
-- `NativeWebView`: implemented. The package now ships a browser-targeted embedded control runtime backed by Avalonia Browser native hosting plus a real DOM `iframe`.
+- `NativeWebView`: implemented when the browser-targeted backend assembly is compiled. The runtime path is backed by Avalonia Browser native hosting plus a real DOM `iframe`.
 - `NativeWebDialog`: unsupported in the current implementation.
-- `WebAuthenticationBroker`: implemented through a popup-window flow that monitors the callback URL from browser runtime code.
+- `WebAuthenticationBroker`: implemented when the browser-targeted backend assembly is compiled, through a popup-window flow that monitors the callback URL from browser runtime code.
 - Check `NativeWebViewPlatformImplementationStatusMatrix.Get(NativeWebViewPlatform.Browser)` in code when you need the honest current repo status.
 
 ## Platform Engine Capability

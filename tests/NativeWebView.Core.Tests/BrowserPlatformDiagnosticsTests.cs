@@ -12,7 +12,7 @@ public sealed class BrowserPlatformDiagnosticsTests
             isBrowserHost: false,
             popupSupport: "false");
 
-        Assert.DoesNotContain(diagnostics.Issues, issue => issue.Code == "browser.control.contract_only");
+        AssertContractOnlyWarningMatchesStatus(diagnostics);
         Assert.Contains(diagnostics.Issues, issue => issue.Code == "browser.host.mismatch");
     }
 
@@ -23,7 +23,7 @@ public sealed class BrowserPlatformDiagnosticsTests
             isBrowserHost: true,
             popupSupport: "false");
 
-        Assert.DoesNotContain(diagnostics.Issues, issue => issue.Code == "browser.control.contract_only");
+        AssertContractOnlyWarningMatchesStatus(diagnostics);
         Assert.Contains(diagnostics.Issues, issue => issue.Code == "browser.popup.disabled");
     }
 
@@ -34,6 +34,31 @@ public sealed class BrowserPlatformDiagnosticsTests
             isBrowserHost: true,
             popupSupport: "true");
 
-        Assert.Contains(diagnostics.Issues, issue => issue.Code == "browser.ready");
+        AssertContractOnlyWarningMatchesStatus(diagnostics);
+
+        if (NativeWebViewPlatformImplementationStatusMatrix.Get(NativeWebViewPlatform.Browser).EmbeddedControl ==
+            NativeWebViewRepositoryImplementationStatus.RuntimeImplemented)
+        {
+            Assert.Contains(diagnostics.Issues, issue => issue.Code == "browser.ready");
+        }
+        else
+        {
+            Assert.DoesNotContain(diagnostics.Issues, issue => issue.Code == "browser.ready");
+        }
+    }
+
+    private static void AssertContractOnlyWarningMatchesStatus(NativeWebViewPlatformDiagnostics diagnostics)
+    {
+        var shouldWarn = NativeWebViewPlatformImplementationStatusMatrix.Get(NativeWebViewPlatform.Browser).EmbeddedControl !=
+            NativeWebViewRepositoryImplementationStatus.RuntimeImplemented;
+
+        if (shouldWarn)
+        {
+            Assert.Contains(diagnostics.Issues, issue => issue.Code == "browser.control.contract_only");
+        }
+        else
+        {
+            Assert.DoesNotContain(diagnostics.Issues, issue => issue.Code == "browser.control.contract_only");
+        }
     }
 }

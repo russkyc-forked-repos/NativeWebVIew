@@ -13,7 +13,7 @@ title: "Platform Support Matrix"
 | Linux | Implemented | Implemented | Implemented | Implemented |
 | iOS | Implemented when built with the .NET 8 Apple workload | Unsupported | Implemented when built with the .NET 8 Apple workload | Implemented on iOS 17+ when built with the .NET 8 Apple workload |
 | Android | Implemented when built with the .NET 8 Android workload | Unsupported | Implemented when built with the .NET 8 Android workload | Contract-only, app-wide platform API only |
-| Browser | Implemented | Unsupported | Implemented | Unsupported |
+| Browser | Implemented when built for the browser target | Unsupported | Implemented when built for the browser target | Unsupported |
 
 Use `NativeWebViewPlatformImplementationStatusMatrix.Get(platform)` to inspect the current repo status in code. Use `NativeWebViewProxyPlatformSupportMatrix.Get(platform)` for proxy-specific status.
 
@@ -21,7 +21,7 @@ Use `NativeWebViewPlatformImplementationStatusMatrix.Get(platform)` to inspect t
 
 - Registered backend modules and `Features` continue to describe the broader platform capability contract for that engine family.
 - Current repo runtime status is intentionally tracked separately so docs and applications can distinguish stubbed contracts from implemented native host paths.
-- Today, Windows, macOS, Linux, iOS, Android, and Browser are the platforms with real embedded `NativeWebView` control hosts in this repository. Windows, macOS, and Linux also ship real `NativeWebDialog` runtime paths, and `WebAuthenticationBroker` now has runtime implementations across all currently supported platforms. The iOS and Android runtime paths are built from their platform-targeted backend assemblies rather than the default `net8.0` contract build; the Browser runtime is built from the browser-targeted backend assembly and hosts an `iframe` plus popup/browser-auth integration through Avalonia Browser native control hosting.
+- Today, Windows, macOS, and Linux have real embedded `NativeWebView` control hosts in the default desktop build. iOS and Android runtime paths are built from their platform-targeted backend assemblies rather than the default `net8.0` contract build, and the Browser runtime is built from the browser-targeted backend assembly and hosts an `iframe` plus popup/browser-auth integration through Avalonia Browser native control hosting.
 
 ## Practical Notes
 

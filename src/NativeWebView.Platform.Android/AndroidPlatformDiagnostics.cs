@@ -78,8 +78,8 @@ internal static class AndroidPlatformDiagnostics
             issues.Add(new NativeWebViewDiagnosticIssue(
                 code: "android.control.contract_only",
                 severity: NativeWebViewDiagnosticSeverity.Warning,
-                message: "Android currently registers the NativeWebView control contract, but the embedded control runtime is not implemented in this repo yet.",
-                recommendation: "Treat Android embedded control support as planned work and check NativeWebViewPlatformImplementationStatusMatrix before shipping."));
+                message: "Android currently registers the NativeWebView control contract, but this build does not include the workload-targeted embedded control runtime.",
+                recommendation: "Build the Android-targeted backend assembly and check NativeWebViewPlatformImplementationStatusMatrix before shipping embedded control support."));
         }
     }
 }

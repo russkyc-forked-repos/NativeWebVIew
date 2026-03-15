@@ -155,6 +155,7 @@ internal static class LinuxNativeInterop
     private const string GlibName = "libglib-2.0.so.0";
     private const string WebKitName = "libwebkit2gtk-4.1.so.0";
     private const string JavaScriptCoreName = "libjavascriptcoregtk-4.1.so.0";
+    private const string X11Name = "libX11.so.6";
 
     private static readonly object GtkInitializationGate = new();
     private static IntPtr _display;
@@ -372,6 +373,20 @@ internal static class LinuxNativeInterop
 
     [DllImport(GdkName)]
     internal static extern IntPtr gdk_x11_window_get_xid(IntPtr window);
+
+    [DllImport(X11Name)]
+    private static extern int XReparentWindow(
+        IntPtr display,
+        IntPtr window,
+        IntPtr parent,
+        int x,
+        int y);
+
+    [DllImport(X11Name)]
+    private static extern int XMapWindow(IntPtr display, IntPtr window);
+
+    [DllImport(X11Name)]
+    private static extern int XFlush(IntPtr display);
 
     [DllImport(GlibName)]
     private static extern uint g_idle_add_full(int priority, GSourceFunc function, IntPtr data, GDestroyNotify? notify);
@@ -614,6 +629,39 @@ internal static class LinuxNativeInterop
         var handle = GCHandle.Alloc(action);
         var callbackHandle = GCHandle.ToIntPtr(handle);
         _ = g_idle_add_full(0, IdleSourceCallback, callbackHandle, null);
+    }
+
+    public static void AttachX11WindowToParent(IntPtr childWindow, IntPtr parentWindow)
+    {
+        if (childWindow == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Child X11 window handle is invalid.");
+        }
+
+        if (parentWindow == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Parent X11 window handle is invalid.");
+        }
+
+        if (_display == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("GTK display is not initialized.");
+        }
+
+        var xDisplay = gdk_x11_display_get_xdisplay(_display);
+        if (xDisplay == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("Unable to resolve the X11 display for Linux native attachment.");
+        }
+
+        var reparentResult = XReparentWindow(xDisplay, childWindow, parentWindow, 0, 0);
+        if (reparentResult != 0)
+        {
+            throw new InvalidOperationException($"Unable to parent Linux host window to X11 parent (XReparentWindow returned {reparentResult}).");
+        }
+
+        _ = XMapWindow(xDisplay, childWindow);
+        _ = XFlush(xDisplay);
     }
 
     public static IDisposable ConnectSignal<T>(IntPtr instance, string signalName, T handler)

@@ -1,5 +1,10 @@
 using NativeWebView.Core;
 
+using System.Reflection;
+using NativeWebView.Platform.Android;
+using NativeWebView.Platform.Browser;
+using NativeWebView.Platform.iOS;
+
 namespace NativeWebView.Core.Tests;
 
 public sealed class PlatformImplementationStatusTests
@@ -35,23 +40,23 @@ public sealed class PlatformImplementationStatusTests
             },
             {
                 NativeWebViewPlatform.IOS,
-                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
+                GetAssemblyMetadataStatus(typeof(IOSNativeWebViewBackend).Assembly, "NativeWebView.EmbeddedControlRuntime"),
                 NativeWebViewRepositoryImplementationStatus.Unsupported,
-                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
+                GetAssemblyMetadataStatus(typeof(IOSNativeWebViewBackend).Assembly, "NativeWebView.AuthenticationBrokerRuntime"),
                 null
             },
             {
                 NativeWebViewPlatform.Android,
-                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
+                GetAssemblyMetadataStatus(typeof(AndroidNativeWebViewBackend).Assembly, "NativeWebView.EmbeddedControlRuntime"),
                 NativeWebViewRepositoryImplementationStatus.Unsupported,
-                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
+                GetAssemblyMetadataStatus(typeof(AndroidNativeWebViewBackend).Assembly, "NativeWebView.AuthenticationBrokerRuntime"),
                 null
             },
             {
                 NativeWebViewPlatform.Browser,
-                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
+                GetAssemblyMetadataStatus(typeof(BrowserNativeWebViewBackend).Assembly, "NativeWebView.EmbeddedControlRuntime"),
                 NativeWebViewRepositoryImplementationStatus.Unsupported,
-                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
+                GetAssemblyMetadataStatus(typeof(BrowserNativeWebViewBackend).Assembly, "NativeWebView.AuthenticationBrokerRuntime"),
                 null
             },
             {
@@ -102,20 +107,27 @@ public sealed class PlatformImplementationStatusTests
     }
 
     [Fact]
-    public void AllSupportedPlatformsExceptUnknown_HaveEmbeddedControlRuntimeToday()
+    public void HasEmbeddedControlRuntime_MatchesEmbeddedControlStatus()
     {
         foreach (var platform in Enum.GetValues<NativeWebViewPlatform>())
         {
             var status = NativeWebViewPlatformImplementationStatusMatrix.Get(platform);
-            var shouldHaveRuntime =
-                platform == NativeWebViewPlatform.Android ||
-                platform == NativeWebViewPlatform.Browser ||
-                platform == NativeWebViewPlatform.IOS ||
-                platform == NativeWebViewPlatform.MacOS ||
-                platform == NativeWebViewPlatform.Linux ||
-                platform == NativeWebViewPlatform.Windows;
 
-            Assert.Equal(shouldHaveRuntime, status.HasEmbeddedControlRuntime);
+            Assert.Equal(
+                status.EmbeddedControl == NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
+                status.HasEmbeddedControlRuntime);
         }
+    }
+
+    private static NativeWebViewRepositoryImplementationStatus GetAssemblyMetadataStatus(Assembly assembly, string key)
+    {
+        var value = assembly
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(attribute => string.Equals(attribute.Key, key, StringComparison.Ordinal))
+            ?.Value;
+
+        return bool.TryParse(value, out var isImplemented) && isImplemented
+            ? NativeWebViewRepositoryImplementationStatus.RuntimeImplemented
+            : NativeWebViewRepositoryImplementationStatus.ContractOnly;
     }
 }
