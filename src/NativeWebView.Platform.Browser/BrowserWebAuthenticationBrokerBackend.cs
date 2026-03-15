@@ -1,24 +1,40 @@
+#if NATIVEWEBVIEW_BROWSER_RUNTIME
+using System.Runtime.InteropServices.JavaScript;
+#endif
 using NativeWebView.Core;
 
 namespace NativeWebView.Platform.Browser;
 
-public sealed class BrowserWebAuthenticationBrokerBackend : WebAuthenticationBrokerStubBase
+public sealed class BrowserWebAuthenticationBrokerBackend : IWebAuthenticationBrokerBackend
 {
     public BrowserWebAuthenticationBrokerBackend()
-        : base(NativeWebViewPlatform.Browser, BrowserPlatformFeatures.Instance)
     {
+        Platform = NativeWebViewPlatform.Browser;
+        Features = BrowserPlatformFeatures.Instance;
     }
 
-    public override async Task<WebAuthenticationResult> AuthenticateAsync(
+    public NativeWebViewPlatform Platform { get; }
+
+    public IWebViewPlatformFeatures Features { get; }
+
+    public async Task<WebAuthenticationResult> AuthenticateAsync(
         Uri requestUri,
         Uri callbackUri,
         WebAuthenticationOptions options = WebAuthenticationOptions.None,
         CancellationToken cancellationToken = default)
     {
-        var baseline = await base.AuthenticateAsync(requestUri, callbackUri, options, cancellationToken).ConfigureAwait(false);
-        if (baseline.ResponseStatus is not WebAuthenticationStatus.UserCancel)
+        ArgumentNullException.ThrowIfNull(requestUri);
+        ArgumentNullException.ThrowIfNull(callbackUri);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!Features.Supports(NativeWebViewFeature.AuthenticationBroker))
         {
-            return baseline;
+            return WebAuthenticationResult.Error(WebAuthenticationBrokerBackendSupport.NotImplementedError);
+        }
+
+        if (WebAuthenticationBrokerBackendSupport.TryCreateImmediateSuccess(requestUri, callbackUri, out var immediateResult))
+        {
+            return immediateResult;
         }
 
         if ((options & WebAuthenticationOptions.SilentMode) != 0)
@@ -26,20 +42,78 @@ public sealed class BrowserWebAuthenticationBrokerBackend : WebAuthenticationBro
             return WebAuthenticationResult.UserCancel();
         }
 
-        var responseData = AppendQueryParameters(callbackUri, "popup=1&platform=browser");
-        return WebAuthenticationResult.Success(responseData);
+        if ((options & WebAuthenticationOptions.UseHttpPost) != 0 || !IsInspectableHttpCallback(callbackUri))
+        {
+            return WebAuthenticationBrokerBackendSupport.UnsupportedHttpPost();
+        }
+
+#if NATIVEWEBVIEW_BROWSER_RUNTIME
+        if (OperatingSystem.IsBrowser())
+        {
+            BrowserNativeWebViewInterop.EnsureInstalled();
+
+            JSObject? popup = null;
+            try
+            {
+                popup = BrowserNativeWebViewInterop.OpenPopup(
+                    requestUri.AbsoluteUri,
+                    WebAuthenticationBrokerBackendSupport.CreateInteractiveTitle(requestUri, options));
+
+                if (popup is null)
+                {
+                    return WebAuthenticationBrokerBackendSupport.RuntimeUnavailable();
+                }
+
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (BrowserNativeWebViewInterop.IsPopupClosed(popup))
+                    {
+                        return WebAuthenticationResult.UserCancel();
+                    }
+
+                    var popupUrl = BrowserNativeWebViewInterop.GetPopupUrl(popup);
+                    if (Uri.TryCreate(popupUrl, UriKind.Absolute, out var popupUri) &&
+                        WebAuthenticationBrokerBackendSupport.IsCallbackUri(popupUri, callbackUri))
+                    {
+                        return WebAuthenticationResult.Success(
+                            WebAuthenticationBrokerBackendSupport.ToResponseData(popupUri));
+                    }
+
+                    await Task.Delay(TimeSpan.FromMilliseconds(200), cancellationToken).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                if (popup is not null)
+                {
+                    try
+                    {
+                        BrowserNativeWebViewInterop.ClosePopup(popup);
+                    }
+                    catch
+                    {
+                        // Popup teardown is best effort.
+                    }
+
+                    popup.Dispose();
+                }
+            }
+        }
+#endif
+
+        return WebAuthenticationBrokerBackendSupport.RuntimeUnavailable();
     }
 
-    private static string AppendQueryParameters(Uri callbackUri, string parameters)
+    public void Dispose()
     {
-        var value = callbackUri.ToString();
-        var fragmentIndex = value.IndexOf('#');
-        var beforeFragment = fragmentIndex >= 0 ? value[..fragmentIndex] : value;
-        var fragment = fragmentIndex >= 0 ? value[fragmentIndex..] : string.Empty;
+    }
 
-        var separator = beforeFragment.Contains('?', StringComparison.Ordinal)
-            ? (beforeFragment.EndsWith("?", StringComparison.Ordinal) || beforeFragment.EndsWith("&", StringComparison.Ordinal) ? string.Empty : "&")
-            : "?";
-        return $"{beforeFragment}{separator}{parameters}{fragment}";
+    private static bool IsInspectableHttpCallback(Uri callbackUri)
+    {
+        return callbackUri.IsAbsoluteUri &&
+            (string.Equals(callbackUri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(callbackUri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase));
     }
 }

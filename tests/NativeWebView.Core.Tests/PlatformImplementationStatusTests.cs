@@ -15,43 +15,43 @@ public sealed class PlatformImplementationStatusTests
             {
                 NativeWebViewPlatform.Windows,
                 NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
-                NativeWebViewRepositoryImplementationStatus.ContractOnly,
-                NativeWebViewRepositoryImplementationStatus.ContractOnly,
+                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
+                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
                 null
             },
             {
                 NativeWebViewPlatform.MacOS,
                 NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
                 NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
-                NativeWebViewRepositoryImplementationStatus.ContractOnly,
+                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
                 null
             },
             {
                 NativeWebViewPlatform.Linux,
                 NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
-                NativeWebViewRepositoryImplementationStatus.ContractOnly,
-                NativeWebViewRepositoryImplementationStatus.ContractOnly,
+                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
+                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
                 null
             },
             {
                 NativeWebViewPlatform.IOS,
                 NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
                 NativeWebViewRepositoryImplementationStatus.Unsupported,
-                NativeWebViewRepositoryImplementationStatus.ContractOnly,
+                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
                 null
             },
             {
                 NativeWebViewPlatform.Android,
                 NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
                 NativeWebViewRepositoryImplementationStatus.Unsupported,
-                NativeWebViewRepositoryImplementationStatus.ContractOnly,
+                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
                 null
             },
             {
                 NativeWebViewPlatform.Browser,
                 NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
                 NativeWebViewRepositoryImplementationStatus.Unsupported,
-                NativeWebViewRepositoryImplementationStatus.ContractOnly,
+                NativeWebViewRepositoryImplementationStatus.RuntimeImplemented,
                 null
             },
             {

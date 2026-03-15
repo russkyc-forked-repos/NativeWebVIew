@@ -310,6 +310,41 @@ internal static partial class BrowserNativeWebViewInterop
                 kind: kind === "json" ? "json" : "string",
                 value
               }, "*");
+            },
+            openPopup: (url, title) => {
+              const popup = globalThis.open(
+                safeString(url),
+                safeString(title) || "_blank",
+                "popup=yes,width=480,height=720,resizable=yes,scrollbars=yes");
+              return popup || null;
+            },
+            closePopup: (popup) => {
+              if (!popup) {
+                return;
+              }
+
+              try {
+                popup.close();
+              } catch (error) {
+              }
+            },
+            isPopupClosed: (popup) => {
+              try {
+                return !popup || popup.closed === true;
+              } catch (error) {
+                return true;
+              }
+            },
+            getPopupUrl: (popup) => {
+              try {
+                if (!popup || !popup.location) {
+                  return "";
+                }
+
+                return popup.location.href || "";
+              } catch (error) {
+                return null;
+              }
             }
           };
         })();
@@ -373,4 +408,16 @@ internal static partial class BrowserNativeWebViewInterop
 
     [JSImport("globalThis.__nativeWebViewBrowser.postWebMessage")]
     public static partial void PostWebMessage(JSObject frame, string kind, string value);
+
+    [JSImport("globalThis.__nativeWebViewBrowser.openPopup")]
+    public static partial JSObject? OpenPopup(string url, string title);
+
+    [JSImport("globalThis.__nativeWebViewBrowser.closePopup")]
+    public static partial void ClosePopup(JSObject popup);
+
+    [JSImport("globalThis.__nativeWebViewBrowser.isPopupClosed")]
+    public static partial bool IsPopupClosed(JSObject popup);
+
+    [JSImport("globalThis.__nativeWebViewBrowser.getPopupUrl")]
+    public static partial string? GetPopupUrl(JSObject popup);
 }

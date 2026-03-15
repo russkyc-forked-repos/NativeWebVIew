@@ -254,6 +254,9 @@ internal static class LinuxNativeInterop
     internal delegate void CloseSignal(IntPtr webView, IntPtr userData);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate int DeleteEventSignal(IntPtr widget, IntPtr eventHandle, IntPtr userData);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void JavaScriptFinishedCallback(IntPtr webView, IntPtr asyncResult, IntPtr userData);
 
     private sealed class ConnectedSignal : IDisposable
@@ -327,6 +330,18 @@ internal static class LinuxNativeInterop
 
     [DllImport(GtkName)]
     internal static extern void gtk_window_set_resizable(IntPtr window, bool resizable);
+
+    [DllImport(GtkName)]
+    internal static extern void gtk_window_resize(IntPtr window, int width, int height);
+
+    [DllImport(GtkName)]
+    internal static extern void gtk_window_move(IntPtr window, int x, int y);
+
+    [DllImport(GtkName)]
+    internal static extern void gtk_window_present(IntPtr window);
+
+    [DllImport(GtkName)]
+    internal static extern void gtk_window_set_title(IntPtr window, [MarshalAs(UnmanagedType.LPUTF8Str)] string title);
 
     [DllImport(GtkName)]
     internal static extern void gtk_container_add(IntPtr container, IntPtr widget);

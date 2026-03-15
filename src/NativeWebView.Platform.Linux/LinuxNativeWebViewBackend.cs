@@ -96,6 +96,7 @@ public sealed class LinuxNativeWebViewBackend
     private bool _isRuntimeInitialized;
     private bool _coreInitializedRaised;
     private bool _runtimeInitializationRequested;
+    private bool _ownsGtkWindow;
     private bool _disposed;
 
     private bool _canGoBack;
@@ -681,15 +682,9 @@ public sealed class LinuxNativeWebViewBackend
             throw new InvalidOperationException("Parent native handle is invalid.");
         }
 
-        if (!string.Equals(parentHandle.HandleDescriptor, "XID", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException(
-                $"Linux native control attachment requires an XID parent, but received '{parentHandle.HandleDescriptor}'.");
-        }
-
         if (_hostWindowXid != IntPtr.Zero)
         {
-            if (_parentWindowXid == parentHandle.Handle)
+            if (_parentWindowXid == parentHandle.Handle || _gtkWindow == parentHandle.Handle)
             {
                 return new NativePlatformHandle(_hostWindowXid, "XID");
             }
@@ -697,13 +692,35 @@ public sealed class LinuxNativeWebViewBackend
             DetachFromNativeParent();
         }
 
-        var hostHandle = LinuxGtkDispatcher.InvokeAsync(
-            CreateHostWindowOnGtkThread,
-            CancellationToken.None).GetAwaiter().GetResult();
+        LinuxHostWindowHandle hostHandle;
+        if (string.Equals(parentHandle.HandleDescriptor, "XID", StringComparison.OrdinalIgnoreCase))
+        {
+            hostHandle = LinuxGtkDispatcher.InvokeAsync(
+                CreateHostWindowOnGtkThread,
+                CancellationToken.None).GetAwaiter().GetResult();
 
-        _parentWindowXid = parentHandle.Handle;
-        _gtkWindow = hostHandle.GtkWindow;
-        _hostWindowXid = hostHandle.Xid;
+            _parentWindowXid = parentHandle.Handle;
+            _gtkWindow = hostHandle.GtkWindow;
+            _hostWindowXid = hostHandle.Xid;
+            _ownsGtkWindow = true;
+        }
+        else if (string.Equals(parentHandle.HandleDescriptor, "GtkWindow", StringComparison.OrdinalIgnoreCase))
+        {
+            hostHandle = LinuxGtkDispatcher.InvokeAsync(
+                () => ResolveExistingGtkWindowOnGtkThread(parentHandle.Handle),
+                CancellationToken.None).GetAwaiter().GetResult();
+
+            _parentWindowXid = hostHandle.Xid;
+            _gtkWindow = hostHandle.GtkWindow;
+            _hostWindowXid = hostHandle.Xid;
+            _ownsGtkWindow = false;
+        }
+        else
+        {
+            throw new InvalidOperationException(
+                $"Linux native control attachment requires an XID or GtkWindow parent, but received '{parentHandle.HandleDescriptor}'.");
+        }
+
         _attachmentTcs.TrySetResult(true);
 
         if (_runtimeInitializationRequested)
@@ -749,6 +766,7 @@ public sealed class LinuxNativeWebViewBackend
         DestroyRuntimeHost();
         _parentWindowXid = IntPtr.Zero;
         _hostWindowXid = IntPtr.Zero;
+        _ownsGtkWindow = false;
         _attachmentTcs = CreatePendingAttachmentSource();
     }
 
@@ -787,9 +805,16 @@ public sealed class LinuxNativeWebViewBackend
 
                 _signalSubscriptions.Clear();
 
-                if (_gtkWindow != IntPtr.Zero)
+                if (_ownsGtkWindow)
                 {
-                    LinuxNativeInterop.gtk_widget_destroy(_gtkWindow);
+                    if (_gtkWindow != IntPtr.Zero)
+                    {
+                        LinuxNativeInterop.gtk_widget_destroy(_gtkWindow);
+                    }
+                }
+                else if (_webView != IntPtr.Zero)
+                {
+                    LinuxNativeInterop.gtk_widget_destroy(_webView);
                 }
 
                 if (_webContext != IntPtr.Zero)
@@ -1418,6 +1443,30 @@ public sealed class LinuxNativeWebViewBackend
         {
             LinuxNativeInterop.gtk_widget_destroy(gtkWindow);
             throw new InvalidOperationException("GTK did not expose an X11 child window for the Linux host.");
+        }
+
+        return new LinuxHostWindowHandle(gtkWindow, xid);
+    }
+
+    private static LinuxHostWindowHandle ResolveExistingGtkWindowOnGtkThread(nint gtkWindow)
+    {
+        if (gtkWindow == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("GTK window handle is invalid.");
+        }
+
+        LinuxNativeInterop.gtk_widget_realize(gtkWindow);
+
+        var gdkWindow = LinuxNativeInterop.gtk_widget_get_window(gtkWindow);
+        if (gdkWindow == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("GTK did not expose a realized GDK window for the Linux host.");
+        }
+
+        var xid = LinuxNativeInterop.gdk_x11_window_get_xid(gdkWindow);
+        if (xid == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("GTK did not expose an X11 window for the Linux host.");
         }
 
         return new LinuxHostWindowHandle(gtkWindow, xid);

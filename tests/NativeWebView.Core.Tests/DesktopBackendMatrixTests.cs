@@ -97,14 +97,11 @@ public sealed class DesktopBackendMatrixTests
         }
 
         var authResult = await authBackend.AuthenticateAsync(
-            new Uri("https://example.com/auth"),
-            new Uri("https://example.com/callback"));
+            new Uri("https://example.com/callback?state=desktop#result=success"),
+            new Uri("https://example.com/callback?state=desktop#result=success"));
 
-        Assert.Contains(authResult.ResponseStatus, new[]
-        {
-            WebAuthenticationStatus.Success,
-            WebAuthenticationStatus.UserCancel,
-        });
+        Assert.Equal(WebAuthenticationStatus.Success, authResult.ResponseStatus);
+        Assert.Equal("https://example.com/callback?state=desktop#result=success", authResult.ResponseData);
 
         authBackend.Dispose();
     }
