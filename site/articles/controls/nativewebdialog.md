@@ -8,9 +8,9 @@ title: "NativeWebDialog"
 
 ## Availability
 
-- Windows: supported.
-- macOS: supported.
-- Linux: supported.
+- Windows: contract-only in the current repo.
+- macOS: implemented.
+- Linux: contract-only in the current repo.
 - iOS, Android, Browser: unsupported by design in the current implementation.
 
 ## Main Properties
@@ -66,7 +66,8 @@ dialog.Navigate("https://example.com/dialog");
 
 ## Notes
 
-- Dialog backends remain capability-driven just like the embedded control.
+- Dialog backends remain capability-driven just like the embedded control, but only macOS currently has a real runtime dialog path in this repo.
+- Check `NativeWebViewPlatformImplementationStatusMatrix.Get(...)` before treating Windows or Linux dialog support as runtime-complete.
 - In the current repo implementation, per-instance proxy application is effective on macOS 14+ only.
 - Print UI and DevTools depend on the platform backend.
 - Unsupported mobile/browser targets return unsupported backend contracts instead of silently no-op behavior.

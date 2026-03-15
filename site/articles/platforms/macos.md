@@ -10,7 +10,14 @@ title: "macOS"
 - Platform enum: `NativeWebViewPlatform.MacOS`
 - Native engine: `WKWebView`
 
-## Supported Areas
+## Current Repo Implementation Status
+
+- `NativeWebView`: implemented.
+- `NativeWebDialog`: implemented.
+- `WebAuthenticationBroker`: contract-only.
+- Check `NativeWebViewPlatformImplementationStatusMatrix.Get(NativeWebViewPlatform.MacOS)` when you need to distinguish implemented runtime paths from broader capability contracts.
+
+## Platform Engine Capability
 
 - Embedded view
 - GPU surface rendering

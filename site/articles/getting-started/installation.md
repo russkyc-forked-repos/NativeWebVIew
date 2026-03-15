@@ -15,6 +15,8 @@ dotnet add package NativeWebView.Platform.Windows
 
 Replace `NativeWebView.Platform.Windows` with `NativeWebView.Platform.macOS`, `NativeWebView.Platform.Linux`, `NativeWebView.Platform.iOS`, `NativeWebView.Platform.Android`, or `NativeWebView.Platform.Browser` as needed.
 
+Package installation and backend registration are broader than the current repo runtime implementation. Check `NativeWebViewPlatformImplementationStatusMatrix.Get(...)` before treating a target as production-ready.
+
 Optional facades:
 
 ```bash
@@ -50,6 +52,8 @@ var factory = new NativeWebViewBackendFactory();
 factory.UseNativeWebViewWindows();
 ```
 
+This registers the Windows capability contract and the current repo now also ships a real embedded Windows `NativeWebView` control host. `NativeWebDialog` and `WebAuthenticationBroker` on Windows remain contract-only.
+
 If you rely on default constructors, runtime auto-registration is available:
 
 ```csharp
@@ -66,6 +70,16 @@ NativeWebViewDiagnosticsValidator.EnsureReady(diagnostics);
 ```
 
 This is the recommended startup guard in both samples and CI.
+
+If your application requires the real embedded `NativeWebView` control runtime, pair diagnostics with:
+
+```csharp
+var implementationStatus = NativeWebViewPlatformImplementationStatusMatrix.Get(NativeWebViewPlatform.Windows);
+if (implementationStatus.EmbeddedControl != NativeWebViewRepositoryImplementationStatus.RuntimeImplemented)
+{
+    throw new PlatformNotSupportedException("Embedded control runtime is not implemented for this target yet.");
+}
+```
 
 ## Avalonia Integration Notes
 

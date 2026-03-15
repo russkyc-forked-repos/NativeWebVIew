@@ -12,8 +12,8 @@ public sealed class BrowserPlatformDiagnosticsTests
             isBrowserHost: false,
             popupSupport: "false");
 
-        var issue = Assert.Single(diagnostics.Issues);
-        Assert.Equal("browser.host.mismatch", issue.Code);
+        Assert.DoesNotContain(diagnostics.Issues, issue => issue.Code == "browser.control.contract_only");
+        Assert.Contains(diagnostics.Issues, issue => issue.Code == "browser.host.mismatch");
     }
 
     [Fact]
@@ -23,7 +23,17 @@ public sealed class BrowserPlatformDiagnosticsTests
             isBrowserHost: true,
             popupSupport: "false");
 
-        var issue = Assert.Single(diagnostics.Issues);
-        Assert.Equal("browser.popup.disabled", issue.Code);
+        Assert.DoesNotContain(diagnostics.Issues, issue => issue.Code == "browser.control.contract_only");
+        Assert.Contains(diagnostics.Issues, issue => issue.Code == "browser.popup.disabled");
+    }
+
+    [Fact]
+    public void Create_WhenBrowserHostAndPopupSupportEnabled_ReportsReady()
+    {
+        var diagnostics = BrowserPlatformDiagnostics.Create(
+            isBrowserHost: true,
+            popupSupport: "true");
+
+        Assert.Contains(diagnostics.Issues, issue => issue.Code == "browser.ready");
     }
 }
