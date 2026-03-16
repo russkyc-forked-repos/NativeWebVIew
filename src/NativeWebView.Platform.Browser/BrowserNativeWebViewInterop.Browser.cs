@@ -111,7 +111,7 @@ internal static partial class BrowserNativeWebViewInterop
               if (!frameWindow.__nativeWebViewBridgeParentListener) {
                 frameWindow.__nativeWebViewBridgeParentListener = (event) => {
                   const data = event.data;
-                  if (!data || data[hostMessageMarker] !== true) {
+                  if (!data || data[hostMessageMarker] !== true || event.source !== frameWindow.parent) {
                     return;
                   }
 
@@ -127,14 +127,60 @@ internal static partial class BrowserNativeWebViewInterop
                   : null;
               }
 
-              frameWindow.open = (url, target, features) => {
+              const dispatchNewWindow = (url) => {
                 frameWindow.parent.postMessage({
                   [eventMarker]: true,
                   kind: "newWindow",
                   url: safeString(url)
                 }, "*");
+              };
 
-                return frameWindow;
+              const createPopupProxy = (initialUrl) => {
+                let currentUrl = safeString(initialUrl);
+                const navigate = (nextUrl) => {
+                  currentUrl = safeString(nextUrl);
+                  dispatchNewWindow(currentUrl);
+                };
+
+                const location = {
+                  assign: (value) => navigate(value),
+                  replace: (value) => navigate(value),
+                  toString: () => currentUrl,
+                  valueOf: () => currentUrl
+                };
+
+                Object.defineProperty(location, "href", {
+                  configurable: true,
+                  enumerable: true,
+                  get: () => currentUrl,
+                  set: (value) => navigate(value)
+                });
+
+                const popupProxy = {
+                  blur: () => {},
+                  close: () => {
+                    popupProxy.closed = true;
+                  },
+                  closed: false,
+                  focus: () => {},
+                  opener: frameWindow,
+                  postMessage: () => {}
+                };
+
+                Object.defineProperty(popupProxy, "location", {
+                  configurable: true,
+                  enumerable: true,
+                  get: () => location,
+                  set: (value) => navigate(value)
+                });
+
+                return popupProxy;
+              };
+
+              frameWindow.open = (url, target, features) => {
+                const normalizedUrl = safeString(url);
+                dispatchNewWindow(normalizedUrl);
+                return createPopupProxy(normalizedUrl);
               };
 
               return true;

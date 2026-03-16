@@ -1032,16 +1032,17 @@ public sealed class WindowsNativeWebViewBackend
         settings.IsStatusBarEnabled = _isStatusBarEnabled;
         settings.IsZoomControlEnabled = _isZoomControlEnabled;
         settings.IsWebMessageEnabled = true;
-
-        if (_userAgentString is not null)
-        {
-            settings.UserAgent = _userAgentString;
-        }
+        settings.UserAgent = NormalizeRuntimeUserAgent(_userAgentString);
 
         if (_zoomFactor > 0)
         {
             _controller.ZoomFactor = _zoomFactor;
         }
+    }
+
+    internal static string NormalizeRuntimeUserAgent(string? userAgent)
+    {
+        return userAgent ?? string.Empty;
     }
 
     private void AttachRuntimeEvents()

@@ -157,6 +157,31 @@ public sealed class BackendFactoryAndCapabilityTests
     }
 
     [Fact]
+    public void BrowserInteropInstallScript_RestrictsHostMessagesToParentWindow()
+    {
+        var installScript = File.ReadAllText(BrowserInteropSourcePath);
+
+        Assert.Contains("event.source !== frameWindow.parent", installScript);
+    }
+
+    [Fact]
+    public void BrowserInteropInstallScript_ReturnsPopupProxyInsteadOfFrameWindow()
+    {
+        var installScript = File.ReadAllText(BrowserInteropSourcePath);
+
+        Assert.Contains("const createPopupProxy = (initialUrl) =>", installScript);
+        Assert.Contains("return createPopupProxy(normalizedUrl);", installScript);
+        Assert.DoesNotContain("return frameWindow;", installScript);
+    }
+
+    [Fact]
+    public void WindowsBackend_NormalizeRuntimeUserAgent_ClearsNullOverride()
+    {
+        Assert.Equal(string.Empty, WindowsNativeWebViewBackend.NormalizeRuntimeUserAgent(null));
+        Assert.Equal("custom-agent", WindowsNativeWebViewBackend.NormalizeRuntimeUserAgent("custom-agent"));
+    }
+
+    [Fact]
     public void IOSDialogBackend_IsNotRegistered_AndFallbackThrowsOnShow()
     {
         var factory = new NativeWebViewBackendFactory();
@@ -233,4 +258,7 @@ public sealed class BackendFactoryAndCapabilityTests
             Assert.NotEqual(0, result.ResponseErrorDetail);
         }
     }
+
+    private static readonly string BrowserInteropSourcePath =
+        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../src/NativeWebView.Platform.Browser/BrowserNativeWebViewInterop.Browser.cs"));
 }
