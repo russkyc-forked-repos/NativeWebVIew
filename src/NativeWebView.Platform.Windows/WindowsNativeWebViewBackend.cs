@@ -15,6 +15,9 @@ public sealed class WindowsNativeWebViewBackend
       INativeWebViewInstanceConfigurationTarget,
       INativeWebViewNativeControlAttachment
 {
+    private const int EInvalidArgHResult = unchecked((int)0x80070057);
+    internal const string ControllerOptionsFallbackOriginalExceptionDataKey =
+        "NativeWebView.Windows.ControllerOptionsFallbackOriginalException";
     private static readonly NativePlatformHandle PlaceholderPlatformHandle = new((nint)0x1001, "HWND");
     private static readonly NativePlatformHandle PlaceholderViewHandle = new((nint)0x1002, "ICoreWebView2");
     private static readonly NativePlatformHandle PlaceholderControllerHandle = new((nint)0x1003, "ICoreWebView2Controller");
@@ -842,10 +845,10 @@ public sealed class WindowsNativeWebViewBackend
                 throw new InvalidOperationException("Cannot initialize WebView2 without an attached child HWND.");
             }
 
-            var controllerOptions = CreateRuntimeControllerOptions(_environment, _preparedControllerOptions);
-            _controller = controllerOptions is null
-                ? await _environment.CreateCoreWebView2ControllerAsync(_childWindowHandle).ConfigureAwait(true)
-                : await _environment.CreateCoreWebView2ControllerAsync(_childWindowHandle, controllerOptions).ConfigureAwait(true);
+            _controller = await CreateRuntimeControllerAsync(
+                _environment,
+                _childWindowHandle,
+                _preparedControllerOptions).ConfigureAwait(true);
 
             _coreWebView = _controller.CoreWebView2;
             CaptureRuntimeHandles();
@@ -1276,13 +1279,63 @@ public sealed class WindowsNativeWebViewBackend
         };
     }
 
-    private static CoreWebView2ControllerOptions? CreateRuntimeControllerOptions(
+    internal static bool RequiresRuntimeControllerOptions(NativeWebViewControllerOptions? options)
+    {
+        return options is not null &&
+            (!string.IsNullOrWhiteSpace(options.ProfileName) ||
+             options.IsInPrivateModeEnabled ||
+             !string.IsNullOrWhiteSpace(options.ScriptLocale));
+    }
+
+    internal static bool ShouldRetryControllerCreationWithoutOptions(
+        NativeWebViewControllerOptions? options,
+        Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+
+        return RequiresRuntimeControllerOptions(options) &&
+            (exception is ArgumentException ||
+             exception is COMException { HResult: EInvalidArgHResult });
+    }
+
+    private static async Task<CoreWebView2Controller> CreateRuntimeControllerAsync(
         CoreWebView2Environment environment,
+        IntPtr childWindowHandle,
         NativeWebViewControllerOptions? options)
     {
-        if (options is null)
+        if (!RequiresRuntimeControllerOptions(options))
         {
-            return null;
+            return await environment.CreateCoreWebView2ControllerAsync(childWindowHandle).ConfigureAwait(true);
+        }
+
+        try
+        {
+            var controllerOptions = CreateRuntimeControllerOptions(environment, options!);
+            return await environment.CreateCoreWebView2ControllerAsync(childWindowHandle, controllerOptions).ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ShouldRetryControllerCreationWithoutOptions(options, ex))
+        {
+            try
+            {
+                return await environment.CreateCoreWebView2ControllerAsync(childWindowHandle).ConfigureAwait(true);
+            }
+            catch (Exception retryException)
+            {
+                AttachControllerOptionsFallbackExceptionContext(retryException, ex);
+                throw;
+            }
+        }
+    }
+
+    private static CoreWebView2ControllerOptions CreateRuntimeControllerOptions(
+        CoreWebView2Environment environment,
+        NativeWebViewControllerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (!RequiresRuntimeControllerOptions(options))
+        {
+            throw new InvalidOperationException("Runtime controller options were requested without any customized values.");
         }
 
         var controllerOptions = environment.CreateCoreWebView2ControllerOptions();
@@ -1300,6 +1353,19 @@ public sealed class WindowsNativeWebViewBackend
         }
 
         return controllerOptions;
+    }
+
+    internal static void AttachControllerOptionsFallbackExceptionContext(
+        Exception fallbackException,
+        Exception originalException)
+    {
+        ArgumentNullException.ThrowIfNull(fallbackException);
+        ArgumentNullException.ThrowIfNull(originalException);
+
+        if (!fallbackException.Data.Contains(ControllerOptionsFallbackOriginalExceptionDataKey))
+        {
+            fallbackException.Data[ControllerOptionsFallbackOriginalExceptionDataKey] = originalException;
+        }
     }
 
     private CoreWebView2PrintSettings? CreatePrintSettings(NativeWebViewPrintSettings? settings)
