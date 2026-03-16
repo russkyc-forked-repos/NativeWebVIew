@@ -154,7 +154,6 @@ stderr_log="artifacts/integration/ios/stderr.log"
 xcrun simctl install "$sim_udid" "$app_bundle"
 xcrun simctl terminate "$sim_udid" "$bundle_id" >/dev/null 2>&1 || true
 xcrun simctl launch \
-  --console \
   --terminate-running-process \
   --stdout="$stdout_log" \
   --stderr="$stderr_log" \
