@@ -43,9 +43,18 @@ clean_docs_outputs
 cd site
 LUNET_LOG="$(mktemp)"
 
+set +e
 dotnet "${LUNET_DLL}" --stacktrace build 2>&1 | tee "${LUNET_LOG}"
+lunet_exit_code=${PIPESTATUS[0]}
+set -e
 
 if search_logs 'Error while building api dotnet|Lunet\.Api\.DotNet\.DotNetProgramException|Unable to select the api dotnet output' "${LUNET_LOG}" >/dev/null; then
     echo "Lunet reported API/site build errors."
     exit 1
+fi
+
+if [ "${lunet_exit_code}" -ne 0 ] &&
+   ! search_logs 'Unable to build api dotnet' "${LUNET_LOG}" >/dev/null; then
+    echo "Lunet build failed with exit code ${lunet_exit_code}."
+    exit "${lunet_exit_code}"
 fi

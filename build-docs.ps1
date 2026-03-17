@@ -86,10 +86,18 @@ try {
         $lunetLog = [System.IO.Path]::GetTempFileName()
         try {
             & dotnet $lunetDll --stacktrace build 2>&1 | Tee-Object -FilePath $lunetLog
+            $lunetExitCode = $LASTEXITCODE
 
             $lunetErrors = Find-DocsMatches -Pattern 'Error while building api dotnet|Lunet\.Api\.DotNet\.DotNetProgramException|Unable to select the api dotnet output' -Paths @($lunetLog)
-            if ($LASTEXITCODE -eq 0 -and $lunetErrors) {
+            if ($lunetErrors) {
                 throw "Lunet reported API/site build errors.`n$lunetErrors"
+            }
+
+            if ($lunetExitCode -ne 0) {
+                $allowedErrors = Find-DocsMatches -Pattern 'Unable to build api dotnet' -Paths @($lunetLog)
+                if (-not $allowedErrors) {
+                    throw "Lunet build failed with exit code $lunetExitCode."
+                }
             }
         }
         finally {
