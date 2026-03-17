@@ -195,4 +195,28 @@ public sealed class WindowsControllerOptionsTests
             fallbackException.Data[WindowsNativeWebViewBackend.ControllerOptionsFallbackOriginalExceptionDataKey]);
         Assert.Same(originalException, stored);
     }
+
+    [Fact]
+    public void ResolveInitializationNavigationTarget_PrefersPendingNavigationOverRuntimeSource()
+    {
+        var pendingNavigationUri = new Uri("http://127.0.0.1:5000/integration/bridge.html?kind=dialog");
+        var runtimeCurrentUri = new Uri("about:blank");
+
+        var result = WindowsNativeWebViewBackend.ResolveInitializationNavigationTarget(
+            pendingNavigationUri,
+            runtimeCurrentUri);
+
+        Assert.Equal(pendingNavigationUri, result);
+    }
+
+    [Fact]
+    public void ResolveInitializationNavigationTarget_FallsBackToRuntimeSource_WhenPendingNavigationIsMissing()
+    {
+        var runtimeCurrentUri = new Uri("about:blank");
+
+        Assert.Equal(
+            runtimeCurrentUri,
+            WindowsNativeWebViewBackend.ResolveInitializationNavigationTarget(null, runtimeCurrentUri));
+        Assert.Null(WindowsNativeWebViewBackend.ResolveInitializationNavigationTarget(null, null));
+    }
 }

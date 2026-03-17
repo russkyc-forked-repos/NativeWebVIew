@@ -860,11 +860,13 @@ public sealed class WindowsNativeWebViewBackend
             AttachRuntimeEvents();
             ApplyRuntimeSettings();
             UpdateControllerBounds();
+            var requestedPendingNavigationUri = _pendingNavigationUri;
             SyncNavigationSnapshotFromRuntime();
+            _pendingNavigationUri = ResolveInitializationNavigationTarget(requestedPendingNavigationUri, _currentUrl);
 
-            if (_pendingNavigationUri is not null)
+            if (requestedPendingNavigationUri is not null)
             {
-                NavigateCore(_pendingNavigationUri);
+                NavigateCore(requestedPendingNavigationUri);
             }
 
             _isRuntimeInitialized = true;
@@ -1174,6 +1176,11 @@ public sealed class WindowsNativeWebViewBackend
         _currentUrl = TryCreateUri(_coreWebView.Source) ?? _currentUrl;
         _pendingNavigationUri = _currentUrl;
         UpdateHistorySnapshot(_coreWebView.CanGoBack, _coreWebView.CanGoForward);
+    }
+
+    internal static Uri? ResolveInitializationNavigationTarget(Uri? requestedPendingNavigationUri, Uri? runtimeCurrentUri)
+    {
+        return requestedPendingNavigationUri ?? runtimeCurrentUri;
     }
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
