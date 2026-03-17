@@ -37,15 +37,15 @@ cleanup() {
 
 trap cleanup EXIT
 
-dotnet tool restore
+LUNET_DLL="$("${SCRIPT_DIR}/scripts/ensure-lunet.sh")"
 clean_docs_outputs
 
 cd site
 LUNET_LOG="$(mktemp)"
 
-dotnet tool run lunet --stacktrace build 2>&1 | tee "${LUNET_LOG}"
+dotnet "${LUNET_DLL}" --stacktrace build 2>&1 | tee "${LUNET_LOG}"
 
-if search_logs 'ERR lunet|Error while building api dotnet|Unable to select the api dotnet output' "${LUNET_LOG}" >/dev/null; then
+if search_logs 'Error while building api dotnet|Lunet\.Api\.DotNet\.DotNetProgramException|Unable to select the api dotnet output' "${LUNET_LOG}" >/dev/null; then
     echo "Lunet reported API/site build errors."
     exit 1
 fi

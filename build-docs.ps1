@@ -78,16 +78,16 @@ try {
         }
     }
 
-    dotnet tool restore
+    $lunetDll = & (Join-Path $PSScriptRoot 'scripts/ensure-lunet.ps1')
     Clear-DocsOutputs
 
     Push-Location site
     try {
         $lunetLog = [System.IO.Path]::GetTempFileName()
         try {
-            dotnet tool run lunet --stacktrace build 2>&1 | Tee-Object -FilePath $lunetLog
+            & dotnet $lunetDll --stacktrace build 2>&1 | Tee-Object -FilePath $lunetLog
 
-            $lunetErrors = Find-DocsMatches -Pattern 'ERR lunet|Error while building api dotnet|Unable to select the api dotnet output' -Paths @($lunetLog)
+            $lunetErrors = Find-DocsMatches -Pattern 'Error while building api dotnet|Lunet\.Api\.DotNet\.DotNetProgramException|Unable to select the api dotnet output' -Paths @($lunetLog)
             if ($LASTEXITCODE -eq 0 -and $lunetErrors) {
                 throw "Lunet reported API/site build errors.`n$lunetErrors"
             }
