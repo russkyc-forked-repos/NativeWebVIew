@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework />
+    <DotNetRootFromSdk>$([System.IO.Path]::GetFullPath('$(MSBuildSDKsPath)/../../..'))</DotNetRootFromSdk>
     <HasBrowserRuntimeSdk>false</HasBrowserRuntimeSdk>
-    <HasBrowserRuntimeSdk Condition="Exists('/usr/local/share/dotnet/packs/Microsoft.NET.Runtime.WebAssembly.Sdk')">true</HasBrowserRuntimeSdk>
-    <HasBrowserRuntimeSdk Condition="Exists('/usr/share/dotnet/packs/Microsoft.NET.Runtime.WebAssembly.Sdk')">true</HasBrowserRuntimeSdk>
+    <HasBrowserRuntimeSdk Condition="Exists('$(DOTNET_ROOT)/packs/Microsoft.NET.Runtime.WebAssembly.Sdk') Or Exists('$(DOTNET_ROOT_X64)/packs/Microsoft.NET.Runtime.WebAssembly.Sdk') Or Exists('$(DotNetRootFromSdk)/packs/Microsoft.NET.Runtime.WebAssembly.Sdk')">true</HasBrowserRuntimeSdk>
     <EnableBrowserRuntime Condition="'$(EnableBrowserRuntime)' == '' and '$(HasBrowserRuntimeSdk)' == 'true'">true</EnableBrowserRuntime>
     <EnableBrowserRuntime Condition="'$(EnableBrowserRuntime)' == ''">false</EnableBrowserRuntime>
     <TargetFrameworks>net10.0</TargetFrameworks>
