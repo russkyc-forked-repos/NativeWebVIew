@@ -49,7 +49,7 @@
             Height="34"
             Margin="4,0,8,0"
             VerticalContentAlignment="Center"
-            Watermark="Enter URL and press Enter or Navigate" />
+            PlaceholderText="Enter URL and press Enter or Navigate" />
 
         <Button
             x:Name="RefreshStateButton"
@@ -325,10 +325,10 @@
                 </StackPanel>
 
                 <WrapPanel Orientation="Horizontal" ItemHeight="34" ItemWidth="220">
-                  <CheckBox x:Name="DevToolsEnabledCheckBox" Content="DevTools Enabled" IsChecked="True" Checked="DevToolsEnabledCheckBoxOnChecked" Unchecked="DevToolsEnabledCheckBoxOnChecked" />
-                  <CheckBox x:Name="ContextMenuEnabledCheckBox" Content="Context Menu Enabled" IsChecked="True" Checked="ContextMenuEnabledCheckBoxOnChecked" Unchecked="ContextMenuEnabledCheckBoxOnChecked" />
-                  <CheckBox x:Name="StatusBarEnabledCheckBox" Content="Status Bar Enabled" IsChecked="True" Checked="StatusBarEnabledCheckBoxOnChecked" Unchecked="StatusBarEnabledCheckBoxOnChecked" />
-                  <CheckBox x:Name="ZoomControlEnabledCheckBox" Content="Zoom Control Enabled" IsChecked="True" Checked="ZoomControlEnabledCheckBoxOnChecked" Unchecked="ZoomControlEnabledCheckBoxOnChecked" />
+                  <CheckBox x:Name="DevToolsEnabledCheckBox" Content="DevTools Enabled" IsChecked="True" IsCheckedChanged="DevToolsEnabledCheckBoxOnChecked" />
+                  <CheckBox x:Name="ContextMenuEnabledCheckBox" Content="Context Menu Enabled" IsChecked="True" IsCheckedChanged="ContextMenuEnabledCheckBoxOnChecked" />
+                  <CheckBox x:Name="StatusBarEnabledCheckBox" Content="Status Bar Enabled" IsChecked="True" IsCheckedChanged="StatusBarEnabledCheckBoxOnChecked" />
+                  <CheckBox x:Name="ZoomControlEnabledCheckBox" Content="Zoom Control Enabled" IsChecked="True" IsCheckedChanged="ZoomControlEnabledCheckBoxOnChecked" />
                 </WrapPanel>
               </StackPanel>
             </Border>
@@ -372,11 +372,11 @@
               <StackPanel Spacing="8">
                 <StackPanel Orientation="Horizontal" Spacing="6">
                   <TextBlock Width="70" VerticalAlignment="Center" Text="Move" />
-                  <TextBox x:Name="DialogLeftTextBox" Width="90" Watermark="Left" />
-                  <TextBox x:Name="DialogTopTextBox" Width="90" Watermark="Top" />
+                  <TextBox x:Name="DialogLeftTextBox" Width="90" PlaceholderText="Left" />
+                  <TextBox x:Name="DialogTopTextBox" Width="90" PlaceholderText="Top" />
                   <TextBlock Width="70" Margin="16,0,0,0" VerticalAlignment="Center" Text="Resize" />
-                  <TextBox x:Name="DialogWidthTextBox" Width="90" Watermark="Width" />
-                  <TextBox x:Name="DialogHeightTextBox" Width="90" Watermark="Height" />
+                  <TextBox x:Name="DialogWidthTextBox" Width="90" PlaceholderText="Width" />
+                  <TextBox x:Name="DialogHeightTextBox" Width="90" PlaceholderText="Height" />
                   <TextBlock Width="65" Margin="16,0,0,0" VerticalAlignment="Center" Text="Zoom" />
                   <TextBox x:Name="DialogZoomTextBox" Width="90" />
                   <TextBlock Width="95" Margin="16,0,0,0" VerticalAlignment="Center" Text="User Agent" />
@@ -463,7 +463,7 @@
                 Foreground="#CFD6E4"
                 TextWrapping="Wrap"
                 Text="Avalonia-managed controls layered over the webview host for airspace testing." />
-            <TextBox x:Name="ManagedOverlayTextBox" Watermark="Type here to test managed input..." />
+            <TextBox x:Name="ManagedOverlayTextBox" PlaceholderText="Type here to test managed input..." />
             <StackPanel Orientation="Horizontal" Spacing="8">
               <Button Click="ManagedOverlayActionButtonOnClick">
                 <StackPanel Orientation="Horizontal" Spacing="6">
