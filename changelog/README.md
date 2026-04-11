@@ -38,5 +38,5 @@ Validate fragments:
 Generate release notes preview:
 
 ```bash
-./scripts/build-release-notes.sh --version 0.1.0 --output artifacts/release-notes.md
+./scripts/build-release-notes.sh --version 12.0.0 --output artifacts/release-notes.md
 ```

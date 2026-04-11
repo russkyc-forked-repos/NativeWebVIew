@@ -39,7 +39,7 @@ Choose the primary surface first:
 - Use [`NativeWebDialog`](../controls/nativewebdialog.md) when the browser should live in a separate desktop window on Windows, macOS, or Linux.
 - Use [`WebAuthenticationBroker`](../controls/webauthenticationbroker.md) when the main goal is an auth callback flow. The repo now ships runtime implementations across Windows, macOS, Linux, iOS, Android, and Browser.
 
-Mobile and workload-specific note: the iOS and Android runtime paths come from their platform-targeted backend assemblies rather than the default `net8.0` contract build. Browser authentication is popup-based and does not provide `NativeWebDialog`.
+Mobile and workload-specific note: the iOS and Android runtime paths come from their platform-targeted backend assemblies rather than the default `net10.0` contract build. Browser authentication is popup-based and does not provide `NativeWebDialog`.
 
 Choose the render mode next:
 

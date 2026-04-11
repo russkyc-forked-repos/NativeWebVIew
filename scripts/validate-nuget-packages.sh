@@ -184,8 +184,8 @@ for package_id in "${packages[@]}"; do
     contents_ok="No"
   fi
 
-  if ! grep -qx "lib/net8.0/${package_id}.dll" <<< "$archive_listing"; then
-    record_failure "$package_id" "Managed assembly lib/net8.0/${package_id}.dll was not packed."
+  if ! grep -qx "lib/net10.0/${package_id}.dll" <<< "$archive_listing"; then
+    record_failure "$package_id" "Managed assembly lib/net10.0/${package_id}.dll was not packed."
     contents_ok="No"
   fi
 

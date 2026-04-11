@@ -17,7 +17,7 @@ Review the actual `NativeWebView` control implementation status for every non-ma
 - Browser now ships a real browser-targeted `NativeWebView` runtime backed by Avalonia Browser native control hosting plus a DOM `iframe` bridge.
 - Windows, macOS, and Linux now also ship real `NativeWebDialog` runtime paths; mobile/browser dialog backends remain intentionally unregistered.
 - `WebAuthenticationBroker` now has runtime implementations across all supported platforms, with platform-specific limits documented separately.
-- The shared control project still targets `net8.0`, but backend-owned native attachment is now sufficient for Windows, Linux, iOS, and Android without adding more control-assembly target forks.
+- The shared control project still targets `net10.0`, but backend-owned native attachment is now sufficient for Windows, Linux, iOS, and Android without adding more control-assembly target forks.
 
 ### Actual current repo runtime status
 
@@ -99,7 +99,7 @@ No remaining embedded-control bring-up phases are pending in this plan.
 
 #### Verification
 
-- Browser-target build of `NativeWebView.Platform.Browser` for `net8.0-browser1.0`.
+- Browser-target build of `NativeWebView.Platform.Browser` for `net10.0-browser1.0`.
 - Shared repository test/build validation for status, diagnostics, and control-host integration.
 
 #### Exit criteria

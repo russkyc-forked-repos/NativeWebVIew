@@ -32,7 +32,7 @@
 ## Validation
 
 - `./scripts/validate-changelog-fragments.sh`
-- `./scripts/build-release-notes.sh --version 0.1.0 --output artifacts/release-notes.md`
+- `./scripts/build-release-notes.sh --version 12.0.0 --output artifacts/release-notes.md`
 - `dotnet build NativeWebView.sln -c Debug`
 - `dotnet test NativeWebView.sln -c Debug --no-build`
 - `dotnet build NativeWebView.sln -c Release`

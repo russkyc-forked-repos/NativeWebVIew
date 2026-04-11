@@ -7,7 +7,7 @@ logcat_output="artifacts/integration/android/logcat.txt"
 adb_wait_timeout_seconds="${ADB_WAIT_TIMEOUT_SECONDS:-180}"
 integration_timeout_seconds="${ANDROID_INTEGRATION_TIMEOUT_SECONDS:-240}"
 project_path="tests/NativeWebView.Integration.Android/NativeWebView.Integration.Android.csproj"
-framework="net8.0-android34.0"
+framework="net10.0-android36.0"
 package_name="com.wieslawsoltes.nativewebview.integration.android"
 log_tag="NWVIntegration"
 

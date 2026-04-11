@@ -21,7 +21,7 @@ Use `NativeWebViewPlatformImplementationStatusMatrix.Get(platform)` to inspect t
 
 - Registered backend modules and `Features` continue to describe the broader platform capability contract for that engine family.
 - Current repo runtime status is intentionally tracked separately so docs and applications can distinguish stubbed contracts from implemented native host paths.
-- Today, Windows, macOS, and Linux have real embedded `NativeWebView` control hosts in the default desktop build. iOS and Android runtime paths are built from their platform-targeted backend assemblies rather than the default `net8.0` contract build, and the Browser runtime is built from the browser-targeted backend assembly and hosts an `iframe` plus popup/browser-auth integration through Avalonia Browser native control hosting.
+- Today, Windows, macOS, and Linux have real embedded `NativeWebView` control hosts in the default desktop build. iOS and Android runtime paths are built from their platform-targeted backend assemblies rather than the default `net10.0` contract build, and the Browser runtime is built from the browser-targeted backend assembly and hosts an `iframe` plus popup/browser-auth integration through Avalonia Browser native control hosting.
 
 ## Practical Notes
 

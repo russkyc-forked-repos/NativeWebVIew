@@ -53,7 +53,7 @@ Workflow: `.github/workflows/release.yml`
 
 Trigger:
 
-- Push tag `v*` (for example `v0.1.0`)
+- Push tag `v*` (for example `v12.0.0`)
 
 Stages:
 

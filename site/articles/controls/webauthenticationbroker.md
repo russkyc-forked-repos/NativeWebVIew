@@ -41,7 +41,7 @@ title: "WebAuthenticationBroker"
 - `UseHttpPost` is currently unsupported on every runtime backend in this repo and returns `ErrorHttp`.
 - Browser authentication requires popup support plus an inspectable `http` or `https` callback URL. Custom-scheme callbacks are not supported there.
 - When a platform-specific interactive runtime cannot be launched on the current host or TFM, the broker returns `ErrorHttp` instead of reporting a false user cancel.
-- Desktop runtimes use dedicated dialog-hosted sessions, while iOS and Android use workload-targeted modal or activity-hosted sessions rather than the default `net8.0` contract assemblies.
+- Desktop runtimes use dedicated dialog-hosted sessions, while iOS and Android use workload-targeted modal or activity-hosted sessions rather than the default `net10.0` contract assemblies.
 
 Use `WebAuthenticationBroker` when you need a callback-driven auth session. Use [`NativeWebDialog`](nativewebdialog.md) instead when you need a general-purpose desktop browser window.
 
