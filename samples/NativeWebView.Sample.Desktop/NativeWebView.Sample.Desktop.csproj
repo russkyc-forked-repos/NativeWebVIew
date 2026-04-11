@@ -20,9 +20,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Avalonia.Diagnostics" />
     <PackageReference Include="Avalonia.Desktop" />
     <PackageReference Include="Avalonia.Themes.Fluent" />
     <PackageReference Include="FluentIcons.Avalonia" />
+    <PackageReference Include="ProDiagnostics" />
+    <PackageReference Include="Tmds.DBus.Protocol" />
   </ItemGroup>
 </Project>
