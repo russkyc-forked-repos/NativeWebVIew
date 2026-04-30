@@ -26,7 +26,7 @@ dotnet add package NativeWebView.Auth
 
 - `NativeWebView.Dialog` is meaningful on the desktop runtime paths: Windows, macOS, and Linux.
 - `NativeWebView.Auth` is implemented across the current Windows, macOS, Linux, iOS, Android, and Browser runtime paths.
-- iOS and Android runtime support comes from their platform-targeted backend assemblies rather than the default `net8.0` contract build.
+- iOS and Android runtime support comes from their platform-targeted backend assemblies rather than the default `net10.0` contract build.
 
 ## Package Layout
 

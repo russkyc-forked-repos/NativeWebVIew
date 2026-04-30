@@ -72,7 +72,7 @@ with api.dotnet
     menu_title = "API Reference"
     config = "Release"
     properties = {
-        TargetFramework: "net8.0"
+        TargetFramework: "net10.0"
     }
     projects = [
         { name: "NativeWebView", path: "../src/NativeWebView/NativeWebView.csproj" },

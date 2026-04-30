@@ -10,7 +10,7 @@ runtime_identifier="${IOS_SIMULATOR_RUNTIME_IDENTIFIER:-}"
 python_bin="${PYTHON_BIN:-python3}"
 bundle_id="com.wieslawsoltes.nativewebview.integration.ios"
 project_path="tests/NativeWebView.Integration.iOS/NativeWebView.Integration.iOS.csproj"
-framework="net8.0-ios17.0"
+framework="net10.0-ios26.0"
 timeout_seconds="${IOS_INTEGRATION_TIMEOUT_SECONDS:-240}"
 
 while [[ $# -gt 0 ]]; do

@@ -25,7 +25,7 @@ The API reference is generated from the shipped projects under `src/` via `with 
 
 Current API settings:
 
-- `TargetFramework: net8.0`
+- `TargetFramework: net10.0`
 - local API pages generated under `/api`
 - package id advertised by the docs site: `NativeWebView`
 - `external_apis` mappings for Avalonia assemblies to `https://api-docs.avaloniaui.net/docs`

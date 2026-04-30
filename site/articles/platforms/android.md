@@ -46,7 +46,7 @@ factory.UseNativeWebViewAndroid();
 ## Diagnostics Notes
 
 Diagnostics use `ANDROID_API_LEVEL` for minimum API-level enforcement (`24+`).
-The real runtime path is compiled from the Android-targeted backend assembly; the default `net8.0` build remains a contract/stub asset for non-Android hosts.
+The real runtime path is compiled from the Android-targeted backend assembly; the default `net10.0` build remains a contract/stub asset for non-Android hosts.
 
 ## Proxy Notes
 
