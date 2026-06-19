@@ -18,7 +18,9 @@ namespace NativeWebView.Sample.Desktop;
 
 public partial class MainWindow : Window
 {
-    private readonly StringBuilder _eventLog = new();
+    private const int MaxEventLogEntries = 500;
+
+    private readonly Queue<string> _eventLogEntries = new();
     private NativeWebDialog? _dialog;
     private WebAuthenticationBroker? _authenticationBroker;
     private bool _dialogEventsAttached;
@@ -47,6 +49,8 @@ public partial class MainWindow : Window
     private int? _lastFaviconByteLength;
     private bool _lastFaviconDisplayed;
     private int _faviconRequestVersion;
+    private bool _eventLogUpdateQueued;
+    private bool _summaryRefreshQueued;
 
     public MainWindow()
     {
@@ -650,16 +654,64 @@ public partial class MainWindow : Window
 
     private void AddLog(string message)
     {
-        _eventLog.Append('[')
+        var entry = new StringBuilder()
+            .Append('[')
             .Append(DateTimeOffset.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture))
             .Append("] ")
-            .AppendLine(message);
+            .Append(message)
+            .ToString();
 
-        EventLogBox.Text = _eventLog.ToString();
+        _eventLogEntries.Enqueue(entry);
+        while (_eventLogEntries.Count > MaxEventLogEntries)
+        {
+            _eventLogEntries.Dequeue();
+        }
+
+        if (_eventLogUpdateQueued)
+        {
+            return;
+        }
+
+        _eventLogUpdateQueued = true;
+        Dispatcher.UIThread.Post(UpdateEventLogText, DispatcherPriority.Background);
+    }
+
+    private void UpdateEventLogText()
+    {
+        _eventLogUpdateQueued = false;
+
+        var builder = new StringBuilder();
+        foreach (var entry in _eventLogEntries)
+        {
+            builder.AppendLine(entry);
+        }
+
+        EventLogBox.Text = builder.ToString();
         EventLogBox.CaretIndex = EventLogBox.Text?.Length ?? 0;
     }
 
     private void RefreshSummaries()
+    {
+        if (_summaryRefreshQueued)
+        {
+            return;
+        }
+
+        _summaryRefreshQueued = true;
+        Dispatcher.UIThread.Post(() =>
+        {
+            _summaryRefreshQueued = false;
+            RefreshSummariesCore();
+        }, DispatcherPriority.Background);
+    }
+
+    private void RefreshSummariesNow()
+    {
+        _summaryRefreshQueued = false;
+        RefreshSummariesCore();
+    }
+
+    private void RefreshSummariesCore()
     {
         var featureBuilder = new StringBuilder();
         featureBuilder.Append("Platform: ").AppendLine(WebViewControl.Platform.ToString())
@@ -1147,7 +1199,7 @@ public partial class MainWindow : Window
 
     private void RefreshStateButtonOnClick(object? sender, RoutedEventArgs e)
     {
-        RefreshSummaries();
+        RefreshSummariesNow();
         AddLog("State summary refreshed.");
     }
 
