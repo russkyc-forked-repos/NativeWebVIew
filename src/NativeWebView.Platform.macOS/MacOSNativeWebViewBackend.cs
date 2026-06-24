@@ -3,7 +3,7 @@ using NativeWebView.Interop;
 
 namespace NativeWebView.Platform.macOS;
 
-public sealed class MacOSNativeWebViewBackend : NativeWebViewBackendStubBase, INativeWebViewPlatformHandleProvider
+public sealed class MacOSNativeWebViewBackend : NativeWebViewBackendStubBase, INativeWebViewBackend, INativeWebViewPlatformHandleProvider
 {
     private static readonly NativePlatformHandle PlatformHandle = new((nint)0x2001, "NSView");
     private static readonly NativePlatformHandle ViewHandle = new((nint)0x2002, "WKWebView");
@@ -44,4 +44,7 @@ public sealed class MacOSNativeWebViewBackend : NativeWebViewBackendStubBase, IN
         downloadManager = null;
         return false;
     }
+
+    bool INativeWebViewBackend.TryGetDownloadManager(out INativeWebViewDownloadManager? downloadManager) =>
+        TryGetDownloadManager(out downloadManager);
 }

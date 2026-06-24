@@ -24,7 +24,8 @@ internal static class MacOSPlatformFeatures
         NativeWebViewFeature.GpuSurfaceRendering |
         NativeWebViewFeature.OffscreenRendering |
         NativeWebViewFeature.RenderFrameCapture |
-        NativeWebViewFeature.Favicon;
+        NativeWebViewFeature.Favicon |
+        NativeWebViewFeature.Downloads;
 
     public static IWebViewPlatformFeatures Instance => new WebViewPlatformFeatures(
         NativeWebViewPlatform.MacOS,

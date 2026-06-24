@@ -1,8 +1,10 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Media.Imaging;
+using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using NativeWebView.Auth;
 using NativeWebView.Core;
@@ -22,6 +24,8 @@ public partial class MainWindow : Window
 
     private readonly Queue<string> _eventLogEntries = new();
     private NativeWebDialog? _dialog;
+    private LocalDownloadTestServer? _downloadTestServer;
+    private DownloadTraceListener? _downloadTraceListener;
     private WebAuthenticationBroker? _authenticationBroker;
     private bool _dialogEventsAttached;
     private NativeWebViewPlatform _platform;
@@ -55,6 +59,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent(true);
+        _downloadTraceListener = new DownloadTraceListener(message => AddLog(message));
+        Trace.Listeners.Add(_downloadTraceListener);
         ConfigureDefaults();
         AttachWebViewEvents();
         Opened += OnOpened;
@@ -65,6 +71,14 @@ public partial class MainWindow : Window
         base.OnClosed(e);
 
         _dialog?.Dispose();
+        if (_downloadTraceListener is not null)
+        {
+            Trace.Listeners.Remove(_downloadTraceListener);
+            _downloadTraceListener.Dispose();
+            _downloadTraceListener = null;
+        }
+
+        _downloadTestServer?.Dispose();
         _authenticationBroker?.Dispose();
         _preservedPresenter?.Dispose();
         foreach (var presenter in _retiredPreservedPresenters)
@@ -114,6 +128,16 @@ public partial class MainWindow : Window
         }
 
         RefreshSummaries();
+    }
+
+    private LocalDownloadTestServer EnsureDownloadTestServer()
+    {
+        if (_downloadTestServer is not null)
+            return _downloadTestServer;
+
+        _downloadTestServer = LocalDownloadTestServer.Start(message => Dispatcher.UIThread.Post(() => AddLog(message)));
+        AddLog($"Download diagnostics server started: {_downloadTestServer.BaseUri}");
+        return _downloadTestServer;
     }
 
     private static bool IsDesktopPlatform(NativeWebViewPlatform platform)
@@ -295,6 +319,14 @@ public partial class MainWindow : Window
         WebViewControl.NavigationHistoryChanged += (_, e) =>
             AddLog($"NavigationHistoryChanged: canGoBack={e.CanGoBack}, canGoForward={e.CanGoForward}");
 
+        WebViewControl.DownloadStarting += WebViewControlOnDownloadStarting;
+        WebViewControl.DownloadStarted += (_, e) =>
+            AddLog($"DownloadStarted: {FormatDownloadSnapshot(e.Snapshot)}");
+        WebViewControl.DownloadChanged += (_, e) =>
+            AddLog($"DownloadChanged: {FormatDownloadSnapshot(e.Snapshot)}");
+        WebViewControl.DownloadCompleted += (_, e) =>
+            AddLog($"DownloadCompleted: {FormatDownloadSnapshot(e.Snapshot)}");
+
         WebViewControl.FaviconChanged += (_, e) =>
         {
             AddLog($"FaviconChanged: uri={e.Uri?.ToString() ?? "<null>"}");
@@ -314,6 +346,59 @@ public partial class MainWindow : Window
             e.Options.ScriptLocale ??= "en-US";
             AddLog("CoreWebView2ControllerOptionsRequested");
         };
+    }
+
+    private async void WebViewControlOnDownloadStarting(object? sender, NativeWebViewDownloadStartingEventArgs e)
+    {
+        _ = sender;
+        AddLog(
+            $"DownloadStarting: uri={e.Uri}, suggested={e.SuggestedFileName ?? "<null>"}, mime={e.MimeType ?? "<null>"}, total={e.TotalBytesToReceive?.ToString(CultureInfo.InvariantCulture) ?? "<null>"}");
+
+        using var deferral = e.GetDeferral();
+        try
+        {
+            var storageProvider = StorageProvider;
+            if (storageProvider?.CanSave is not true)
+            {
+                e.Cancel = true;
+                AddLog("DownloadStarting: canceled because StorageProvider.CanSave is false.");
+                return;
+            }
+
+            var suggestedFileName = NormalizeDownloadFileName(e.SuggestedFileName, e.Uri);
+            var extension = Path.GetExtension(suggestedFileName);
+            var allFiles = new FilePickerFileType("All files")
+            {
+                Patterns = ["*.*"],
+            };
+
+            var file = await storageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+            {
+                Title = "Save NativeWebView Download As",
+                SuggestedFileName = suggestedFileName,
+                DefaultExtension = string.IsNullOrWhiteSpace(extension) ? null : extension,
+                ShowOverwritePrompt = true,
+                FileTypeChoices = [allFiles],
+                SuggestedFileType = allFiles,
+            });
+
+            var localPath = file?.TryGetLocalPath();
+            if (string.IsNullOrWhiteSpace(localPath))
+            {
+                e.Cancel = true;
+                AddLog("DownloadStarting: save picker canceled.");
+                return;
+            }
+
+            e.DestinationPath = localPath;
+            e.AllowOverwrite = true;
+            AddLog($"DownloadStarting: destination selected: {localPath}");
+        }
+        catch (Exception ex)
+        {
+            e.Cancel = true;
+            AddLog($"DownloadStarting: picker failed: {FormatException(ex)}");
+        }
     }
 
     private async Task RefreshFaviconAsync(string reason)
@@ -650,6 +735,39 @@ public partial class MainWindow : Window
         ContextMenuEnabledCheckBox.IsChecked = WebViewControl.IsContextMenuEnabled;
         StatusBarEnabledCheckBox.IsChecked = WebViewControl.IsStatusBarEnabled;
         ZoomControlEnabledCheckBox.IsChecked = WebViewControl.IsZoomControlEnabled;
+    }
+
+    private void LoadDownloadDiagnosticsButtonOnClick(object? sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        var server = EnsureDownloadTestServer();
+        UrlTextBox.Text = server.PageUri.AbsoluteUri;
+        WebViewControl.Navigate(server.PageUri);
+        AddLog($"Navigated to download diagnostics page: {server.PageUri}");
+    }
+
+    private static string NormalizeDownloadFileName(string? suggestedFileName, Uri uri)
+    {
+        var candidate = string.IsNullOrWhiteSpace(suggestedFileName)
+            ? Path.GetFileName(uri.LocalPath)
+            : suggestedFileName;
+
+        if (string.IsNullOrWhiteSpace(candidate))
+            candidate = "nativewebview-download.bin";
+
+        foreach (var invalidChar in Path.GetInvalidFileNameChars())
+            candidate = candidate.Replace(invalidChar, '_');
+
+        return candidate;
+    }
+
+    private static string FormatDownloadSnapshot(NativeWebViewDownloadSnapshot snapshot)
+    {
+        var progress = snapshot.Progress is null
+            ? "<null>"
+            : snapshot.Progress.Value.ToString("P1", CultureInfo.InvariantCulture);
+        return $"id={snapshot.Id}, state={snapshot.State}, bytes={snapshot.BytesReceived}/{snapshot.TotalBytesToReceive?.ToString(CultureInfo.InvariantCulture) ?? "<null>"}, progress={progress}, destination={snapshot.DestinationPath ?? "<null>"}, error={snapshot.ErrorMessage ?? "<null>"}";
     }
 
     private void AddLog(string message)
@@ -1718,4 +1836,24 @@ public partial class MainWindow : Window
         });
     }
 
+    private sealed class DownloadTraceListener(Action<string> log) : TraceListener
+    {
+        private const string Prefix = "NativeWebView.macOS.download";
+
+        public override void Write(string? message)
+        {
+            WriteLine(message);
+        }
+
+        public override void WriteLine(string? message)
+        {
+            if (string.IsNullOrWhiteSpace(message) ||
+                !message.StartsWith(Prefix, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            log($"[NativeDownloadTrace] {message}");
+        }
+    }
 }

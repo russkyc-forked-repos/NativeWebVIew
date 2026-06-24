@@ -284,6 +284,12 @@
                     <TextBlock VerticalAlignment="Center" Text="Delete Cookie" />
                   </StackPanel>
                 </Button>
+                <Button x:Name="LoadDownloadDiagnosticsButton" Classes="menu-action" Click="LoadDownloadDiagnosticsButtonOnClick">
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <fi:SymbolIcon Symbol="Save" />
+                    <TextBlock VerticalAlignment="Center" Text="Load Download Diagnostics" />
+                  </StackPanel>
+                </Button>
               </StackPanel>
             </Flyout>
           </Button.Flyout>

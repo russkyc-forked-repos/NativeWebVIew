@@ -162,9 +162,8 @@ public sealed class DownloadManagerTests
         Assert.NotNull(windowsManager);
         Assert.True(linux.TryGetDownloadManager(out var linuxManager));
         Assert.NotNull(linuxManager);
-
-        Assert.False(macOS.Features.Supports(NativeWebViewFeature.Downloads));
-        Assert.False(macOS.TryGetDownloadManager(out var macOSManager));
-        Assert.Null(macOSManager);
+        Assert.True(macOS.Features.Supports(NativeWebViewFeature.Downloads));
+        Assert.True(macOS.TryGetDownloadManager(out var macOSManager));
+        Assert.NotNull(macOSManager);
     }
 }
