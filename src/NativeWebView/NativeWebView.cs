@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
@@ -44,6 +45,9 @@ public class NativeWebView : NativeControlHost, IDisposable
 
     private MacOSNativeWebViewHost? _macOSHost;
     private readonly long _presenterId = Interlocked.Increment(ref s_nextPresenterId);
+    private int _nativeLayoutRefreshVersion;
+    private int _macOsNavigationReplayVersion;
+    private bool _macOSHostEventForwardersAttached;
     private bool _isDisposed;
     private DispatcherTimer? _framePump;
     private WriteableBitmap? _gpuSurfaceBitmap;
@@ -70,6 +74,10 @@ public class NativeWebView : NativeControlHost, IDisposable
     private EventHandler<NativeWebViewResourceRequestedEventArgs>? _webResourceRequested;
     private EventHandler<NativeWebViewContextMenuRequestedEventArgs>? _contextMenuRequested;
     private EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? _navigationHistoryChanged;
+    private EventHandler<NativeWebViewDownloadStartingEventArgs>? _downloadStarting;
+    private EventHandler<NativeWebViewDownloadItemEventArgs>? _downloadStarted;
+    private EventHandler<NativeWebViewDownloadItemEventArgs>? _downloadChanged;
+    private EventHandler<NativeWebViewDownloadItemEventArgs>? _downloadCompleted;
     private EventHandler<CoreWebViewEnvironmentRequestedEventArgs>? _coreWebView2EnvironmentRequested;
     private EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? _coreWebView2ControllerOptionsRequested;
     private EventHandler<NativeWebViewFaviconChangedEventArgs>? _faviconChanged;
@@ -111,9 +119,11 @@ public class NativeWebView : NativeControlHost, IDisposable
         _ownsInstance = ownsInstance;
         _controller = _instance.Controller;
         _macOSHost = _instance.MacOSHost;
+        Focusable = true;
         _controller.CoreWebView2EnvironmentRequested += OnCoreWebView2EnvironmentRequestedInternal;
         _controller.CoreWebView2ControllerOptionsRequested += OnCoreWebView2ControllerOptionsRequestedInternal;
         AttachControllerEventForwarders();
+        AttachMacOSHostEventForwarders();
         ApplyInstanceConfigurationToBackend();
     }
 
@@ -288,6 +298,30 @@ public class NativeWebView : NativeControlHost, IDisposable
         remove => _navigationHistoryChanged -= value;
     }
 
+    public event EventHandler<NativeWebViewDownloadStartingEventArgs>? DownloadStarting
+    {
+        add => _downloadStarting += value;
+        remove => _downloadStarting -= value;
+    }
+
+    public event EventHandler<NativeWebViewDownloadItemEventArgs>? DownloadStarted
+    {
+        add => _downloadStarted += value;
+        remove => _downloadStarted -= value;
+    }
+
+    public event EventHandler<NativeWebViewDownloadItemEventArgs>? DownloadChanged
+    {
+        add => _downloadChanged += value;
+        remove => _downloadChanged -= value;
+    }
+
+    public event EventHandler<NativeWebViewDownloadItemEventArgs>? DownloadCompleted
+    {
+        add => _downloadCompleted += value;
+        remove => _downloadCompleted -= value;
+    }
+
     public event EventHandler<CoreWebViewEnvironmentRequestedEventArgs>? CoreWebView2EnvironmentRequested
     {
         add => _coreWebView2EnvironmentRequested += value;
@@ -389,6 +423,10 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.WebResourceRequested += ForwardWebResourceRequested;
         _controller.ContextMenuRequested += ForwardContextMenuRequested;
         _controller.NavigationHistoryChanged += ForwardNavigationHistoryChanged;
+        _controller.DownloadStarting += ForwardDownloadStarting;
+        _controller.DownloadStarted += ForwardDownloadStarted;
+        _controller.DownloadChanged += ForwardDownloadChanged;
+        _controller.DownloadCompleted += ForwardDownloadCompleted;
         _controller.CoreWebView2EnvironmentRequested += ForwardCoreWebView2EnvironmentRequested;
         _controller.CoreWebView2ControllerOptionsRequested += ForwardCoreWebView2ControllerOptionsRequested;
         _controller.FaviconChanged += ForwardFaviconChanged;
@@ -410,19 +448,59 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.WebResourceRequested -= ForwardWebResourceRequested;
         _controller.ContextMenuRequested -= ForwardContextMenuRequested;
         _controller.NavigationHistoryChanged -= ForwardNavigationHistoryChanged;
+        _controller.DownloadStarting -= ForwardDownloadStarting;
+        _controller.DownloadStarted -= ForwardDownloadStarted;
+        _controller.DownloadChanged -= ForwardDownloadChanged;
+        _controller.DownloadCompleted -= ForwardDownloadCompleted;
         _controller.CoreWebView2EnvironmentRequested -= ForwardCoreWebView2EnvironmentRequested;
         _controller.CoreWebView2ControllerOptionsRequested -= ForwardCoreWebView2ControllerOptionsRequested;
         _controller.FaviconChanged -= ForwardFaviconChanged;
     }
 
+    private void AttachMacOSHostEventForwarders()
+    {
+        if (_macOSHost is null || _macOSHostEventForwardersAttached)
+            return;
+
+        _macOSHost.NavigationStarted += ForwardNavigationStarted;
+        _macOSHost.NavigationCompleted += ForwardNavigationCompleted;
+        _macOSHost.NavigationHistoryChanged += ForwardNavigationHistoryChanged;
+        _macOSHost.NewWindowRequested += ForwardNewWindowRequested;
+        _macOSHost.NativeFocusRequested += ForwardMacOSNativeFocusRequested;
+        _macOSHostEventForwardersAttached = true;
+    }
+
+    private void DetachMacOSHostEventForwarders()
+    {
+        if (_macOSHost is null || !_macOSHostEventForwardersAttached)
+            return;
+
+        _macOSHost.NavigationStarted -= ForwardNavigationStarted;
+        _macOSHost.NavigationCompleted -= ForwardNavigationCompleted;
+        _macOSHost.NavigationHistoryChanged -= ForwardNavigationHistoryChanged;
+        _macOSHost.NewWindowRequested -= ForwardNewWindowRequested;
+        _macOSHost.NativeFocusRequested -= ForwardMacOSNativeFocusRequested;
+        _macOSHostEventForwardersAttached = false;
+    }
+
     private void ForwardCoreWebView2Initialized(object? sender, CoreWebViewInitializedEventArgs e) =>
         _coreWebView2Initialized?.Invoke(sender, e);
 
-    private void ForwardNavigationStarted(object? sender, NativeWebViewNavigationStartedEventArgs e) =>
-        _navigationStarted?.Invoke(sender, e);
+    private void ForwardNavigationStarted(object? sender, NativeWebViewNavigationStartedEventArgs e)
+    {
+        if (IsSyntheticMacOsControllerNavigationEvent(sender))
+            return;
 
-    private void ForwardNavigationCompleted(object? sender, NativeWebViewNavigationCompletedEventArgs e) =>
+        _navigationStarted?.Invoke(sender, e);
+    }
+
+    private void ForwardNavigationCompleted(object? sender, NativeWebViewNavigationCompletedEventArgs e)
+    {
+        if (IsSyntheticMacOsControllerNavigationEvent(sender))
+            return;
+
         _navigationCompleted?.Invoke(sender, e);
+    }
 
     private void ForwardWebMessageReceived(object? sender, NativeWebViewMessageReceivedEventArgs e) =>
         _webMessageReceived?.Invoke(sender, e);
@@ -448,14 +526,59 @@ public class NativeWebView : NativeControlHost, IDisposable
     private void ForwardNewWindowRequested(object? sender, NativeWebViewNewWindowRequestedEventArgs e) =>
         _newWindowRequested?.Invoke(sender, e);
 
+    private void ForwardMacOSNativeFocusRequested(object? sender, EventArgs e)
+    {
+        _ = sender;
+        _ = e;
+
+        if (_isDisposed)
+            return;
+
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            Focus(NavigationMethod.Pointer);
+            return;
+        }
+
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!_isDisposed)
+                Focus(NavigationMethod.Pointer);
+        });
+    }
+
     private void ForwardWebResourceRequested(object? sender, NativeWebViewResourceRequestedEventArgs e) =>
         _webResourceRequested?.Invoke(sender, e);
 
     private void ForwardContextMenuRequested(object? sender, NativeWebViewContextMenuRequestedEventArgs e) =>
         _contextMenuRequested?.Invoke(sender, e);
 
-    private void ForwardNavigationHistoryChanged(object? sender, NativeWebViewNavigationHistoryChangedEventArgs e) =>
+    private void ForwardNavigationHistoryChanged(object? sender, NativeWebViewNavigationHistoryChangedEventArgs e)
+    {
+        if (IsSyntheticMacOsControllerNavigationEvent(sender))
+            return;
+
         _navigationHistoryChanged?.Invoke(sender, e);
+    }
+
+    private bool IsSyntheticMacOsControllerNavigationEvent(object? sender)
+    {
+        return ReferenceEquals(sender, _controller) &&
+               _controller.Platform == NativeWebViewPlatform.MacOS &&
+               OperatingSystem.IsMacOS();
+    }
+
+    private void ForwardDownloadStarting(object? sender, NativeWebViewDownloadStartingEventArgs e) =>
+        _downloadStarting?.Invoke(sender, e);
+
+    private void ForwardDownloadStarted(object? sender, NativeWebViewDownloadItemEventArgs e) =>
+        _downloadStarted?.Invoke(sender, e);
+
+    private void ForwardDownloadChanged(object? sender, NativeWebViewDownloadItemEventArgs e) =>
+        _downloadChanged?.Invoke(sender, e);
+
+    private void ForwardDownloadCompleted(object? sender, NativeWebViewDownloadItemEventArgs e) =>
+        _downloadCompleted?.Invoke(sender, e);
 
     private void ForwardCoreWebView2EnvironmentRequested(object? sender, CoreWebViewEnvironmentRequestedEventArgs e) =>
         _coreWebView2EnvironmentRequested?.Invoke(sender, e);
@@ -690,6 +813,11 @@ public class NativeWebView : NativeControlHost, IDisposable
         return _controller.TryGetCookieManager(out cookieManager);
     }
 
+    public bool TryGetDownloadManager(out INativeWebViewDownloadManager? downloadManager)
+    {
+        return _controller.TryGetDownloadManager(out downloadManager);
+    }
+
     public bool TryGetPlatformHandle(out NativePlatformHandle handle)
     {
         if (_macOSHost is not null && _macOSHost.ViewHandle != IntPtr.Zero)
@@ -788,13 +916,20 @@ public class NativeWebView : NativeControlHost, IDisposable
         {
             if (_macOSHost is not null)
             {
+                AttachMacOSHostEventForwarders();
                 _macOSHost.AttachToParent(parent);
                 ApplyRenderModeToNativeHost();
+                ReplayCurrentMacOsNavigationAfterHostAttach();
                 return _macOSHost.PlatformHandle;
             }
 
-            _macOSHost = new MacOSNativeWebViewHost(parent, _instance.InstanceConfiguration);
+            _controller.TryGetDownloadManager(out var downloadManager);
+            _macOSHost = new MacOSNativeWebViewHost(
+                parent,
+                _instance.InstanceConfiguration,
+                downloadManager as NativeWebViewDownloadManager);
             _instance.MacOSHost = _macOSHost;
+            AttachMacOSHostEventForwarders();
 
             _macOSHost.SetUserAgent(_controller.UserAgentString);
 
@@ -803,10 +938,7 @@ public class NativeWebView : NativeControlHost, IDisposable
                 _macOSHost.SetZoomFactor(_controller.ZoomFactor);
             }
 
-            if (_controller.CurrentUrl is { } currentUrl && currentUrl.IsAbsoluteUri)
-            {
-                _macOSHost.Navigate(currentUrl);
-            }
+            ReplayCurrentMacOsNavigationAfterHostAttach();
 
             ApplyRenderModeToNativeHost();
             return _macOSHost.PlatformHandle;
@@ -895,6 +1027,7 @@ public class NativeWebView : NativeControlHost, IDisposable
         base.OnAttachedToVisualTree(e);
         _isAttached = true;
         ApplyRenderModeState(forceRefresh: true);
+        RequestNativeLayoutRefresh();
     }
 
     protected override void OnDetachedFromVisualTree(VisualTreeAttachmentEventArgs e)
@@ -902,6 +1035,16 @@ public class NativeWebView : NativeControlHost, IDisposable
         base.OnDetachedFromVisualTree(e);
         _isAttached = false;
         StopFramePump();
+    }
+
+    protected override Size ArrangeOverride(Size finalSize)
+    {
+        var arrangedSize = base.ArrangeOverride(finalSize);
+
+        if (OperatingSystem.IsMacOS() && finalSize.Width > 0 && finalSize.Height > 0)
+            RequestNativeLayoutRefresh();
+
+        return arrangedSize;
     }
 
     protected override void OnPropertyChanged(AvaloniaPropertyChangedEventArgs change)
@@ -922,16 +1065,91 @@ public class NativeWebView : NativeControlHost, IDisposable
 
         if (change.Property == BoundsProperty && RenderMode != NativeWebViewRenderMode.Embedded)
         {
-            _macOSHost?.UpdateLayoutForCurrentMode();
-            SyncNativeHostCaptureSize();
-            _ = CaptureAndRenderFrameAsync();
+            RequestNativeLayoutRefresh();
             return;
         }
 
         if (change.Property == BoundsProperty)
         {
-            _macOSHost?.UpdateLayoutForCurrentMode();
+            RequestNativeLayoutRefresh();
         }
+    }
+
+    private void RequestNativeLayoutRefresh()
+    {
+        if (_controller.Platform != NativeWebViewPlatform.MacOS || !OperatingSystem.IsMacOS())
+            return;
+
+        var version = Interlocked.Increment(ref _nativeLayoutRefreshVersion);
+        RefreshNativeLayout();
+
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                if (!_isDisposed && version == _nativeLayoutRefreshVersion)
+                    RefreshNativeLayout();
+            },
+            DispatcherPriority.Render);
+
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                if (!_isDisposed && version == _nativeLayoutRefreshVersion)
+                    RefreshNativeLayout();
+            },
+            DispatcherPriority.Background);
+    }
+
+    private void RefreshNativeLayout()
+    {
+        TryUpdateNativeControlPosition();
+        _macOSHost?.UpdateLayoutForCurrentMode();
+
+        if (RenderMode == NativeWebViewRenderMode.Embedded)
+            return;
+
+        SyncNativeHostCaptureSize();
+        _ = CaptureAndRenderFrameAsync();
+    }
+
+    private void ReplayCurrentMacOsNavigationAfterHostAttach()
+    {
+        if (_controller.CurrentUrl is { IsAbsoluteUri: true } currentUrl)
+            ReplayMacOsNavigationAfterHostAttach(currentUrl);
+    }
+
+    private void ReplayMacOsNavigationAfterHostAttach(Uri uri)
+    {
+        if (_macOSHost is null || _controller.Platform != NativeWebViewPlatform.MacOS || !OperatingSystem.IsMacOS())
+            return;
+
+        var version = Interlocked.Increment(ref _macOsNavigationReplayVersion);
+        _macOSHost.Navigate(uri);
+
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                if (ShouldReplayMacOsNavigation(version, uri))
+                    _macOSHost?.Navigate(uri);
+            },
+            DispatcherPriority.Render);
+
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                if (ShouldReplayMacOsNavigation(version, uri))
+                    _macOSHost?.Navigate(uri);
+            },
+            DispatcherPriority.Background);
+    }
+
+    private bool ShouldReplayMacOsNavigation(int version, Uri uri)
+    {
+        return !_isDisposed &&
+               version == _macOsNavigationReplayVersion &&
+               _macOSHost is not null &&
+               _controller.CurrentUrl is { } currentUrl &&
+               Uri.Compare(currentUrl, uri, UriComponents.AbsoluteUri, UriFormat.SafeUnescaped, StringComparison.Ordinal) == 0;
     }
 
     public void Dispose()
@@ -945,6 +1163,7 @@ public class NativeWebView : NativeControlHost, IDisposable
         StopFramePump();
         DisposeRenderSurfaces();
 
+        DetachMacOSHostEventForwarders();
         DetachControllerEventForwarders();
         _controller.CoreWebView2EnvironmentRequested -= OnCoreWebView2EnvironmentRequestedInternal;
         _controller.CoreWebView2ControllerOptionsRequested -= OnCoreWebView2ControllerOptionsRequestedInternal;

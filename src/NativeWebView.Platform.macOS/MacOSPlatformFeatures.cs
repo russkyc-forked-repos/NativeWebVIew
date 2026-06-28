@@ -23,7 +23,9 @@ internal static class MacOSPlatformFeatures
         NativeWebViewFeature.WebMessageChannel |
         NativeWebViewFeature.GpuSurfaceRendering |
         NativeWebViewFeature.OffscreenRendering |
-        NativeWebViewFeature.RenderFrameCapture;
+        NativeWebViewFeature.RenderFrameCapture |
+        NativeWebViewFeature.Favicon |
+        NativeWebViewFeature.Downloads;
 
     public static IWebViewPlatformFeatures Instance => new WebViewPlatformFeatures(
         NativeWebViewPlatform.MacOS,
