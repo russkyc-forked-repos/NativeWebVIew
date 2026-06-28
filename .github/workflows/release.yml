@@ -110,10 +110,3 @@ jobs:
           files: |
             artifacts/packages/*.nupkg
             artifacts/packages/*.snupkg
-            artifacts/diagnostics/release-platform-diagnostics-${{ env.PACKAGE_VERSION }}.json
-            artifacts/diagnostics/release-platform-diagnostics-${{ env.PACKAGE_VERSION }}.md
-            artifacts/diagnostics/release-current-blocking-baseline-${{ env.PACKAGE_VERSION }}.txt
-            artifacts/diagnostics/release-blocking-regression-${{ env.PACKAGE_VERSION }}.md
-            artifacts/diagnostics/release-blocking-regression-${{ env.PACKAGE_VERSION }}.json
-            artifacts/diagnostics/release-gate-evaluation-${{ env.PACKAGE_VERSION }}.md
-            artifacts/diagnostics/exit-code-contract-${{ env.PACKAGE_VERSION }}/*
