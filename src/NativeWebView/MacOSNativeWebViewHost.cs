@@ -28,9 +28,12 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private static class NativeSymbols
     {
         public static readonly IntPtr NSArrayClass = ObjC.GetClass("NSArray");
+        public static readonly IntPtr NSDataClass = ObjC.GetClass("NSData");
+        public static readonly IntPtr NSImageClass = ObjC.GetClass("NSImage");
         public static readonly IntPtr NSUUIDClass = ObjC.GetClass("NSUUID");
         public static readonly IntPtr NSStringClass = ObjC.GetClass("NSString");
         public static readonly IntPtr NSMenuItemClass = ObjC.GetClass("NSMenuItem");
+        public static readonly IntPtr NSMenuClass = ObjC.GetClass("NSMenu");
         public static readonly IntPtr NSURLClass = ObjC.GetClass("NSURL");
         public static readonly IntPtr NSURLRequestClass = ObjC.GetClass("NSURLRequest");
         public static readonly IntPtr NSApplicationClass = ObjC.GetClass("NSApplication");
@@ -46,9 +49,12 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static readonly IntPtr SelRetain = ObjC.GetSelector("retain");
         public static readonly IntPtr SelRelease = ObjC.GetSelector("release");
         public static readonly IntPtr SelArrayWithObject = ObjC.GetSelector("arrayWithObject:");
+        public static readonly IntPtr SelDataWithBytesLength = ObjC.GetSelector("dataWithBytes:length:");
+        public static readonly IntPtr SelInitWithData = ObjC.GetSelector("initWithData:");
         public static readonly IntPtr SelRemoveFromSuperview = ObjC.GetSelector("removeFromSuperview");
         public static readonly IntPtr SelAddSubview = ObjC.GetSelector("addSubview:");
         public static readonly IntPtr SelSetAutoresizingMask = ObjC.GetSelector("setAutoresizingMask:");
+        public static readonly IntPtr SelSetImage = ObjC.GetSelector("setImage:");
         public static readonly IntPtr SelBounds = ObjC.GetSelector("bounds");
         public static readonly IntPtr SelStringWithUtf8String = ObjC.GetSelector("stringWithUTF8String:");
         public static readonly IntPtr SelUtf8String = ObjC.GetSelector("UTF8String");
@@ -125,9 +131,16 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static readonly IntPtr SelItemAtIndex = ObjC.GetSelector("itemAtIndex:");
         public static readonly IntPtr SelTitle = ObjC.GetSelector("title");
         public static readonly IntPtr SelAddItemWithTitleActionKeyEquivalent = ObjC.GetSelector("addItemWithTitle:action:keyEquivalent:");
+        public static readonly IntPtr SelAddItem = ObjC.GetSelector("addItem:");
+        public static readonly IntPtr SelSetSubmenu = ObjC.GetSelector("setSubmenu:");
+        public static readonly IntPtr SelSeparatorItem = ObjC.GetSelector("separatorItem");
+        public static readonly IntPtr SelInitWithTitle = ObjC.GetSelector("initWithTitle:");
+        public static readonly IntPtr SelSetEnabled = ObjC.GetSelector("setEnabled:");
+        public static readonly IntPtr SelInsertText = ObjC.GetSelector("insertText:");
         public static readonly IntPtr SelSetAction = ObjC.GetSelector("setAction:");
         public static readonly IntPtr SelSetTarget = ObjC.GetSelector("setTarget:");
         public static readonly IntPtr SelNativeDownloadContextLink = ObjC.GetSelector("nativeWebViewDownloadContextLink:");
+        public static readonly IntPtr SelNativeContextMenuCommand = ObjC.GetSelector("nativeWebViewContextMenuCommand:");
     }
 
     private readonly NativeWebViewInstanceConfiguration _instanceConfiguration;
@@ -146,11 +159,14 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private Uri? _contextMenuDownloadUri;
     private readonly HashSet<string> _forcedDownloadUris = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<IntPtr> _pendingStartDownloadBlocks = [];
+    private readonly Dictionary<IntPtr, (string CommandId, NativeWebViewContextMenuTarget Target)> _contextMenuCommands = [];
     private long _captureFrameSequence;
     private GCHandle _managedHandle;
     private IntPtr _navigationDelegateHandle;
     private IntPtr _userContentControllerHandle;
     private IntPtr _downloadBridgeNameHandle;
+    private bool _contextMenuTargetEditable;
+    private string? _activeContextMenuTargetToken;
 
     public MacOSNativeWebViewHost(
         IPlatformHandle parent,
@@ -214,6 +230,10 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     public event EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? NavigationHistoryChanged;
 
     public event EventHandler<NativeWebViewNewWindowRequestedEventArgs>? NewWindowRequested;
+
+    public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested;
+
+    public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
 
     public event EventHandler? NativeFocusRequested;
 
@@ -978,6 +998,12 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
     private void HandleDownloadBridgeMessage(string? value)
     {
+        if (value?.StartsWith("credential\n", StringComparison.Ordinal) == true)
+        {
+            _contextMenuTargetEditable = string.Equals(value["credential\n".Length..], "1", StringComparison.Ordinal);
+            return;
+        }
+
         if (value?.StartsWith("context\n", StringComparison.Ordinal) == true)
         {
             UpdateContextMenuDownloadUri(value["context\n".Length..]);
@@ -1040,6 +1066,142 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         TraceDownload("context-download.start", uri.AbsoluteUri);
         if (!TryStartWebKitDownload(uri))
             _ = StartManagedDownloadAsync(uri, options: null, cancellationToken: CancellationToken.None);
+    }
+
+    private void AppendApplicationContextMenuItems(IntPtr menu)
+    {
+        _contextMenuCommands.Clear();
+        if (!_contextMenuTargetEditable)
+        {
+            _activeContextMenuTargetToken = null;
+            return;
+        }
+
+        var token = Guid.NewGuid().ToString("N");
+        _activeContextMenuTargetToken = token;
+        var target = new NativeWebViewContextMenuTarget(token, true, _lastNavigationUri, frameUri: null, isMainFrame: false);
+        var args = new NativeWebViewContextMenuRequestedEventArgs(0, 0, target);
+        ContextMenuRequested?.Invoke(this, args);
+        if (args.Handled)
+            return;
+
+        foreach (var descriptor in args.AdditionalItems)
+            AppendApplicationContextMenuItem(menu, descriptor, target);
+    }
+
+    private void AppendApplicationContextMenuItem(
+        IntPtr menu,
+        NativeWebViewContextMenuItem descriptor,
+        NativeWebViewContextMenuTarget target)
+    {
+        if (descriptor.Kind == NativeWebViewContextMenuItemKind.Separator)
+        {
+            var separator = ObjC.SendIntPtr(NativeSymbols.NSMenuItemClass, NativeSymbols.SelSeparatorItem);
+            if (separator != IntPtr.Zero)
+                ObjC.SendVoidIntPtr(menu, NativeSymbols.SelAddItem, separator);
+            return;
+        }
+
+        var title = CreateNSString(descriptor.Label);
+        var keyEquivalent = CreateNSString(string.Empty);
+        var action = descriptor.Kind == NativeWebViewContextMenuItemKind.Command
+            ? NativeSymbols.SelNativeContextMenuCommand
+            : IntPtr.Zero;
+        var item = ObjC.SendIntPtrIntPtrIntPtrIntPtr(
+            menu,
+            NativeSymbols.SelAddItemWithTitleActionKeyEquivalent,
+            title,
+            action,
+            keyEquivalent);
+        if (item == IntPtr.Zero)
+            return;
+
+        ObjC.SendVoidByte(item, NativeSymbols.SelSetEnabled, descriptor.IsEnabled ? (byte)1 : (byte)0);
+        ApplyContextMenuIcon(item, descriptor.Icon);
+        if (descriptor.Kind == NativeWebViewContextMenuItemKind.Command)
+        {
+            ObjC.SendVoidIntPtr(item, NativeSymbols.SelSetTarget, ViewHandle);
+            _contextMenuCommands[item] = (descriptor.Id, target);
+            return;
+        }
+
+        var submenuTitle = CreateNSString(descriptor.Label);
+        var submenu = ObjC.SendIntPtrIntPtr(
+            ObjC.SendIntPtr(NativeSymbols.NSMenuClass, NativeSymbols.SelAlloc),
+            NativeSymbols.SelInitWithTitle,
+            submenuTitle);
+        if (submenu == IntPtr.Zero)
+            return;
+        foreach (var child in descriptor.Children)
+            AppendApplicationContextMenuItem(submenu, child, target);
+        ObjC.SendVoidIntPtr(item, NativeSymbols.SelSetSubmenu, submenu);
+        ObjC.SendVoid(submenu, NativeSymbols.SelRelease);
+    }
+
+    private static void ApplyContextMenuIcon(IntPtr item, NativeWebViewContextMenuIcon? icon)
+    {
+        if (icon is null)
+            return;
+
+        var pngData = icon.PngData.ToArray();
+        var pinnedData = GCHandle.Alloc(pngData, GCHandleType.Pinned);
+        try
+        {
+            var data = ObjC.SendIntPtrIntPtrNUInt(
+                NativeSymbols.NSDataClass,
+                NativeSymbols.SelDataWithBytesLength,
+                pinnedData.AddrOfPinnedObject(),
+                (nuint)pngData.Length);
+            if (data == IntPtr.Zero)
+                return;
+
+            var image = ObjC.SendIntPtrIntPtr(
+                ObjC.SendIntPtr(NativeSymbols.NSImageClass, NativeSymbols.SelAlloc),
+                NativeSymbols.SelInitWithData,
+                data);
+            if (image == IntPtr.Zero)
+                return;
+
+            ObjC.SendVoidIntPtr(item, NativeSymbols.SelSetImage, image);
+            ObjC.SendVoid(image, NativeSymbols.SelRelease);
+        }
+        finally
+        {
+            pinnedData.Free();
+        }
+    }
+
+    private void InvokeApplicationContextMenuCommand(IntPtr sender)
+    {
+        if (_contextMenuCommands.TryGetValue(sender, out var invocation))
+        {
+            ContextMenuCommandInvoked?.Invoke(
+                this,
+                new NativeWebViewContextMenuCommandInvokedEventArgs(invocation.CommandId, invocation.Target));
+        }
+    }
+
+    public Task<bool> InsertTextAtContextMenuTargetAsync(
+        NativeWebViewContextMenuTarget target,
+        string text,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(text);
+        cancellationToken.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!target.IsEditable ||
+            ViewHandle == IntPtr.Zero ||
+            !string.Equals(target.Token, _activeContextMenuTargetToken, StringComparison.Ordinal))
+        {
+            return Task.FromResult(false);
+        }
+
+        _activeContextMenuTargetToken = null;
+        TryMakeFirstResponder();
+        var textHandle = CreateNSString(text);
+        ObjC.SendVoidIntPtr(ViewHandle, NativeSymbols.SelInsertText, textHandle);
+        return Task.FromResult(true);
     }
 
     private static bool IsDownloadLinkedFileMenuTitle(string? title)
@@ -1765,6 +1927,14 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
                 post('download', link);
               }, true);
               document.addEventListener('contextmenu', event => {
+                const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+                const candidate = path.find(element => element instanceof HTMLInputElement ||
+                  element instanceof HTMLTextAreaElement ||
+                  element instanceof HTMLElement && element.isContentEditable) || event.target;
+                globalThis.__nativeWebViewContextTarget = candidate instanceof HTMLInputElement ||
+                  candidate instanceof HTMLTextAreaElement ||
+                  candidate instanceof HTMLElement && candidate.isContentEditable ? candidate : null;
+                try { handler.postMessage('credential\n' + (globalThis.__nativeWebViewContextTarget ? '1' : '0')); } catch (_) { }
                 post('context', anchorFromEvent(event));
               }, true);
             })();
@@ -2595,6 +2765,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         private static readonly MenuEventDelegate WillOpenMenuCallback = WillOpenMenu;
         private static readonly MenuEventDelegate DidCloseMenuCallback = DidCloseMenu;
         private static readonly NativeDownloadContextLinkDelegate NativeDownloadContextLinkCallback = NativeDownloadContextLink;
+        private static readonly NativeDownloadContextLinkDelegate NativeContextMenuCommandCallback = NativeContextMenuCommand;
 
         public static IntPtr ClassHandle => ViewClass.Value;
 
@@ -2663,6 +2834,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
                 "nativeWebViewDownloadContextLink:",
                 NativeDownloadContextLinkCallback,
                 "v@:@");
+            AddMethod(
+                classHandle,
+                "nativeWebViewContextMenuCommand:",
+                NativeContextMenuCommandCallback,
+                "v@:@");
 
             ObjC.objc_registerClassPair(classHandle);
             return classHandle;
@@ -2728,7 +2904,10 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         {
             var menu = ObjC.SendSuperIntPtrIntPtr(self, NativeSymbols.WKWebViewClass, selector, eventHandle);
             if (menu != IntPtr.Zero)
+            {
                 EnsureDownloadLinkedFileMenuItem(self, menu);
+                GetOwner(self)?.AppendApplicationContextMenuItems(menu);
+            }
 
             return menu;
         }
@@ -2752,6 +2931,12 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             var senderTitle = ObjC.StringFromNSString(ObjC.SendIntPtr(sender, NativeSymbols.SelTitle));
             TraceDownload("context-menu.action", $"sender={senderTitle ?? "<null>"}");
             GetOwner(self)?.StartContextMenuDownload(senderTitle);
+        }
+
+        private static void NativeContextMenuCommand(IntPtr self, IntPtr selector, IntPtr sender)
+        {
+            _ = selector;
+            GetOwner(self)?.InvokeApplicationContextMenuCommand(sender);
         }
 
         private static void EnsureDownloadLinkedFileMenuItem(IntPtr webView, IntPtr menu)
@@ -3510,6 +3695,9 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         private static extern IntPtr objc_msgSend_IntPtr_IntPtr(IntPtr receiver, IntPtr selector, IntPtr arg1);
 
         [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSend")]
+        private static extern IntPtr objc_msgSend_IntPtr_IntPtr_NUInt(IntPtr receiver, IntPtr selector, IntPtr arg1, nuint arg2);
+
+        [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSend")]
         private static extern IntPtr objc_msgSend_IntPtr_IntPtr_IntPtr_IntPtr(
             IntPtr receiver,
             IntPtr selector,
@@ -3637,6 +3825,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static IntPtr SendIntPtrIntPtr(IntPtr receiver, IntPtr selector, IntPtr arg1)
         {
             return objc_msgSend_IntPtr_IntPtr(receiver, selector, arg1);
+        }
+
+        public static IntPtr SendIntPtrIntPtrNUInt(IntPtr receiver, IntPtr selector, IntPtr arg1, nuint arg2)
+        {
+            return objc_msgSend_IntPtr_IntPtr_NUInt(receiver, selector, arg1, arg2);
         }
 
         public static IntPtr SendIntPtrIntPtrIntPtrIntPtr(IntPtr receiver, IntPtr selector, IntPtr arg1, IntPtr arg2, IntPtr arg3)

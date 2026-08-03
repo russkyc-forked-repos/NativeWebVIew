@@ -1,7 +1,9 @@
 using System.Drawing;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using NativeWebView.Core;
 using NativeWebView.Interop;
@@ -14,8 +16,24 @@ public sealed class WindowsNativeWebViewBackend
       INativeWebViewPlatformHandleProvider,
       INativeWebViewInstanceConfigurationTarget,
       INativeWebViewNativeControlAttachment,
-      INativeWebViewFaviconProvider
+      INativeWebViewFaviconProvider,
+      INativeWebViewContextMenuBackend
 {
+    private const string ContextMenuCaptureScript = """
+        (() => {
+            if (globalThis.__nativeWebViewContextTargetInitialized) return;
+            globalThis.__nativeWebViewContextTargetInitialized = true;
+            document.addEventListener('contextmenu', event => {
+                const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+                const candidate = path.find(element => element instanceof HTMLInputElement ||
+                    element instanceof HTMLTextAreaElement ||
+                    element instanceof HTMLElement && element.isContentEditable) ?? event.target;
+                globalThis.__nativeWebViewContextTarget = candidate instanceof HTMLInputElement ||
+                    candidate instanceof HTMLTextAreaElement ||
+                    candidate instanceof HTMLElement && candidate.isContentEditable ? candidate : null;
+            }, true);
+        })();
+        """;
     private const int EInvalidArgHResult = unchecked((int)0x80070057);
     private static readonly TimeSpan TransientReparentNavigationSuppressionWindow = TimeSpan.FromMilliseconds(750);
     internal const string ControllerOptionsFallbackOriginalExceptionDataKey =
@@ -40,6 +58,8 @@ public sealed class WindowsNativeWebViewBackend
     private readonly INativeWebViewCommandManager _commandManager = NativeWebViewBackendSupport.NoopCommandManagerInstance;
     private readonly INativeWebViewCookieManager _cookieManager = NativeWebViewBackendSupport.NoopCookieManagerInstance;
     private readonly NativeWebViewDownloadManager _downloadManager;
+    private readonly HashSet<CoreWebView2Frame> _frames = [];
+    private readonly ContextMenuIconStreamStore _contextMenuIconStreams = new();
 
     private TaskCompletionSource<bool> _attachmentTcs = CreatePendingAttachmentSource();
     private NativeWebViewInstanceConfiguration _instanceConfiguration = new();
@@ -83,6 +103,7 @@ public sealed class WindowsNativeWebViewBackend
     private bool _suppressNextSameUrlNavigationCompletion;
     private string? _headerString;
     private string? _userAgentString;
+    private string? _activeContextMenuTargetToken;
     private readonly Lock _pendingDownloadGate = new();
     private readonly List<PendingProgrammaticDownload> _pendingProgrammaticDownloads = [];
 
@@ -187,6 +208,8 @@ public sealed class WindowsNativeWebViewBackend
     public event EventHandler<NativeWebViewResourceRequestedEventArgs>? WebResourceRequested;
 
     public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested;
+
+    public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
 
     public event EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? NavigationHistoryChanged;
 
@@ -815,6 +838,7 @@ public sealed class WindowsNativeWebViewBackend
         _controller = null;
         _preparedEnvironmentOptions = null;
         _preparedControllerOptions = null;
+        _contextMenuIconStreams.Dispose();
 
         DestroyRequested?.Invoke(this, new NativeWebViewDestroyRequestedEventArgs("Disposed"));
         _runtimeGate.Dispose();
@@ -1084,6 +1108,7 @@ public sealed class WindowsNativeWebViewBackend
                 cancellationToken).ConfigureAwait(true);
 
             _coreWebView = _controller.CoreWebView2;
+            await _coreWebView.AddScriptToExecuteOnDocumentCreatedAsync(ContextMenuCaptureScript).ConfigureAwait(true);
             CaptureRuntimeHandles();
             AttachRuntimeEvents();
             ApplyRuntimeSettings();
@@ -1298,6 +1323,7 @@ public sealed class WindowsNativeWebViewBackend
         _coreWebView.DownloadStarting += OnDownloadStarting;
         _coreWebView.NewWindowRequested += OnNewWindowRequested;
         _coreWebView.ContextMenuRequested += OnContextMenuRequested;
+        _coreWebView.FrameCreated += OnFrameCreated;
         _coreWebView.WindowCloseRequested += OnWindowCloseRequested;
         _coreWebView.WebResourceRequested += OnWebResourceRequested;
         _coreWebView.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
@@ -1316,6 +1342,7 @@ public sealed class WindowsNativeWebViewBackend
             _coreWebView.DownloadStarting -= OnDownloadStarting;
             _coreWebView.NewWindowRequested -= OnNewWindowRequested;
             _coreWebView.ContextMenuRequested -= OnContextMenuRequested;
+            _coreWebView.FrameCreated -= OnFrameCreated;
             _coreWebView.WindowCloseRequested -= OnWindowCloseRequested;
             _coreWebView.WebResourceRequested -= OnWebResourceRequested;
 
@@ -1333,6 +1360,11 @@ public sealed class WindowsNativeWebViewBackend
         {
             _controller.ZoomFactorChanged -= OnZoomFactorChanged;
         }
+
+        foreach (var frame in _frames.ToArray())
+            UntrackLiveFrame(frame);
+        _activeContextMenuTargetToken = null;
+        _contextMenuIconStreams.Reset();
     }
 
     private void DestroyRuntimeController()
@@ -1417,6 +1449,8 @@ public sealed class WindowsNativeWebViewBackend
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
+        _activeContextMenuTargetToken = null;
+        _contextMenuIconStreams.Reset();
         var uri = TryCreateUri(e.Uri);
         if (ShouldSuppressTransientSameUrlNavigation(uri, e.IsRedirected))
         {
@@ -1681,11 +1715,175 @@ public sealed class WindowsNativeWebViewBackend
 
     private void OnContextMenuRequested(object? sender, CoreWebView2ContextMenuRequestedEventArgs e)
     {
+        // WebView2 reads custom-item icon streams while the native menu is active.
+        // A subsequent request cannot begin until the previous context menu has closed.
+        _contextMenuIconStreams.Reset();
         AddDownloadLinkContextMenuItem(e);
 
-        var forwarded = new NativeWebViewContextMenuRequestedEventArgs(e.Location.X, e.Location.Y);
+        NativeWebViewContextMenuTarget? target = null;
+        if (e.ContextMenuTarget.IsEditable)
+        {
+            var token = Guid.NewGuid().ToString("N");
+            _activeContextMenuTargetToken = token;
+            target = new NativeWebViewContextMenuTarget(
+                token,
+                isEditable: true,
+                _currentUrl,
+                TryCreateUri(e.ContextMenuTarget.PageUri),
+                e.ContextMenuTarget.IsRequestedForMainFrame);
+        }
+        else
+        {
+            _activeContextMenuTargetToken = null;
+        }
+
+        var forwarded = new NativeWebViewContextMenuRequestedEventArgs(e.Location.X, e.Location.Y, target);
         ContextMenuRequested?.Invoke(this, forwarded);
+        if (!forwarded.Handled && target is not null)
+        {
+            foreach (var item in forwarded.AdditionalItems)
+                e.MenuItems.Add(CreateNativeContextMenuItem(item, target));
+        }
         e.Handled = forwarded.Handled;
+    }
+
+    private CoreWebView2ContextMenuItem CreateNativeContextMenuItem(
+        NativeWebViewContextMenuItem descriptor,
+        NativeWebViewContextMenuTarget target)
+    {
+        if (_environment is null)
+            throw new InvalidOperationException("The WebView2 environment is unavailable.");
+
+        var kind = descriptor.Kind switch
+        {
+            NativeWebViewContextMenuItemKind.Command => CoreWebView2ContextMenuItemKind.Command,
+            NativeWebViewContextMenuItemKind.Separator => CoreWebView2ContextMenuItemKind.Separator,
+            NativeWebViewContextMenuItemKind.Submenu => CoreWebView2ContextMenuItemKind.Submenu,
+            _ => throw new ArgumentOutOfRangeException(nameof(descriptor)),
+        };
+        var iconStream = _contextMenuIconStreams.Create(descriptor.Icon);
+        var item = _environment.CreateContextMenuItem(descriptor.Label, iconStream, kind);
+        item.IsEnabled = descriptor.IsEnabled;
+        if (descriptor.Kind == NativeWebViewContextMenuItemKind.Command)
+        {
+            item.CustomItemSelected += (_, _) =>
+                ContextMenuCommandInvoked?.Invoke(
+                    this,
+                    new NativeWebViewContextMenuCommandInvokedEventArgs(descriptor.Id, target));
+        }
+        else if (descriptor.Kind == NativeWebViewContextMenuItemKind.Submenu)
+        {
+            foreach (var child in descriptor.Children)
+                item.Children.Add(CreateNativeContextMenuItem(child, target));
+        }
+
+        return item;
+    }
+
+    public async Task<bool> InsertTextAtContextMenuTargetAsync(
+        NativeWebViewContextMenuTarget target,
+        string text,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(text);
+        cancellationToken.ThrowIfCancellationRequested();
+        EnsureNotDisposed();
+        if (!target.IsEditable ||
+            !string.Equals(target.Token, _activeContextMenuTargetToken, StringComparison.Ordinal) ||
+            _coreWebView is null)
+        {
+            return false;
+        }
+
+        _activeContextMenuTargetToken = null;
+        var script = CreateContextMenuInsertionScript(text);
+        if (target.IsMainFrame && await ExecuteContextMenuScriptAsync(_coreWebView, script).ConfigureAwait(true))
+            return true;
+
+        foreach (var frame in _frames.ToArray())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (await ExecuteContextMenuScriptAsync(frame, script).ConfigureAwait(true))
+                return true;
+        }
+
+        return !target.IsMainFrame && await ExecuteContextMenuScriptAsync(_coreWebView, script).ConfigureAwait(true);
+    }
+
+    private static async Task<bool> ExecuteContextMenuScriptAsync(CoreWebView2 core, string script)
+    {
+        var result = await core.ExecuteScriptAsync(script).ConfigureAwait(true);
+        return string.Equals(result, "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<bool> ExecuteContextMenuScriptAsync(CoreWebView2Frame frame, string script)
+    {
+        try
+        {
+            var result = await frame.ExecuteScriptAsync(script).ConfigureAwait(true);
+            return string.Equals(result, "true", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    private static string CreateContextMenuInsertionScript(string text) => $$"""
+        (() => {
+            const target = globalThis.__nativeWebViewContextTarget;
+            globalThis.__nativeWebViewContextTarget = null;
+            if (!(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement ||
+                target instanceof HTMLElement && target.isContentEditable) || !target.isConnected) return false;
+            const value = {{JsonSerializer.Serialize(text)}};
+            target.focus();
+            if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+                const prototype = target instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
+                const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
+                if (valueSetter) valueSetter.call(target, value); else target.value = value;
+            } else {
+                const selection = globalThis.getSelection?.();
+                const range = selection?.rangeCount ? selection.getRangeAt(0) : document.createRange();
+                if (!selection?.rangeCount || !target.contains(range.commonAncestorContainer))
+                    range.selectNodeContents(target);
+                range.deleteContents();
+                const textNode = document.createTextNode(value);
+                range.insertNode(textNode);
+                range.setStartAfter(textNode);
+                range.collapse(true);
+                selection?.removeAllRanges();
+                selection?.addRange(range);
+            }
+            target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+            target.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+        })();
+        """;
+
+    private void OnFrameCreated(object? sender, CoreWebView2FrameCreatedEventArgs e) => TrackFrame(e.Frame);
+
+    private void OnChildFrameCreated(object? sender, CoreWebView2FrameCreatedEventArgs e) => TrackFrame(e.Frame);
+
+    private void TrackFrame(CoreWebView2Frame frame)
+    {
+        if (!_frames.Add(frame))
+            return;
+        frame.FrameCreated += OnChildFrameCreated;
+        frame.Destroyed += OnFrameDestroyed;
+    }
+
+    private void OnFrameDestroyed(object? sender, object e)
+    {
+        if (sender is CoreWebView2Frame frame)
+            _frames.Remove(frame);
+    }
+
+    private void UntrackLiveFrame(CoreWebView2Frame frame)
+    {
+        frame.FrameCreated -= OnChildFrameCreated;
+        frame.Destroyed -= OnFrameDestroyed;
+        _frames.Remove(frame);
     }
 
     private void AddDownloadLinkContextMenuItem(CoreWebView2ContextMenuRequestedEventArgs e)
