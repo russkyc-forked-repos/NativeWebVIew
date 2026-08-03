@@ -60,6 +60,9 @@ public sealed class WindowsNativeWebViewBackend
     private readonly NativeWebViewDownloadManager _downloadManager;
     private readonly HashSet<CoreWebView2Frame> _frames = [];
     private readonly ContextMenuIconStreamStore _contextMenuIconStreams = new();
+    private readonly List<NativeWebViewContextMenuItem> _cachedContextMenuDescriptors = [];
+    private readonly List<CoreWebView2ContextMenuItem> _cachedContextMenuItems = [];
+    private readonly Dictionary<CoreWebView2ContextMenuItem, string> _cachedContextMenuCommandIds = [];
 
     private TaskCompletionSource<bool> _attachmentTcs = CreatePendingAttachmentSource();
     private NativeWebViewInstanceConfiguration _instanceConfiguration = new();
@@ -103,7 +106,7 @@ public sealed class WindowsNativeWebViewBackend
     private bool _suppressNextSameUrlNavigationCompletion;
     private string? _headerString;
     private string? _userAgentString;
-    private string? _activeContextMenuTargetToken;
+    private NativeWebViewContextMenuTarget? _activeContextMenuTarget;
     private readonly Lock _pendingDownloadGate = new();
     private readonly List<PendingProgrammaticDownload> _pendingProgrammaticDownloads = [];
 
@@ -1363,7 +1366,8 @@ public sealed class WindowsNativeWebViewBackend
 
         foreach (var frame in _frames.ToArray())
             UntrackLiveFrame(frame);
-        _activeContextMenuTargetToken = null;
+        _activeContextMenuTarget = null;
+        ClearCachedContextMenuItems();
         _contextMenuIconStreams.Reset();
     }
 
@@ -1449,8 +1453,7 @@ public sealed class WindowsNativeWebViewBackend
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
-        _activeContextMenuTargetToken = null;
-        _contextMenuIconStreams.Reset();
+        _activeContextMenuTarget = null;
         var uri = TryCreateUri(e.Uri);
         if (ShouldSuppressTransientSameUrlNavigation(uri, e.IsRedirected))
         {
@@ -1715,41 +1718,38 @@ public sealed class WindowsNativeWebViewBackend
 
     private void OnContextMenuRequested(object? sender, CoreWebView2ContextMenuRequestedEventArgs e)
     {
-        // WebView2 reads custom-item icon streams while the native menu is active.
-        // A subsequent request cannot begin until the previous context menu has closed.
-        _contextMenuIconStreams.Reset();
         AddDownloadLinkContextMenuItem(e);
 
         NativeWebViewContextMenuTarget? target = null;
         if (e.ContextMenuTarget.IsEditable)
         {
             var token = Guid.NewGuid().ToString("N");
-            _activeContextMenuTargetToken = token;
             target = new NativeWebViewContextMenuTarget(
                 token,
                 isEditable: true,
                 _currentUrl,
                 TryCreateUri(e.ContextMenuTarget.PageUri),
                 e.ContextMenuTarget.IsRequestedForMainFrame);
+            _activeContextMenuTarget = target;
         }
         else
         {
-            _activeContextMenuTargetToken = null;
+            _activeContextMenuTarget = null;
         }
 
         var forwarded = new NativeWebViewContextMenuRequestedEventArgs(e.Location.X, e.Location.Y, target);
         ContextMenuRequested?.Invoke(this, forwarded);
         if (!forwarded.Handled && target is not null)
         {
-            foreach (var item in forwarded.AdditionalItems)
-                e.MenuItems.Add(CreateNativeContextMenuItem(item, target));
+            EnsureCachedContextMenuItems(forwarded.AdditionalItems);
+            foreach (var item in _cachedContextMenuItems)
+                e.MenuItems.Add(item);
         }
         e.Handled = forwarded.Handled;
     }
 
     private CoreWebView2ContextMenuItem CreateNativeContextMenuItem(
-        NativeWebViewContextMenuItem descriptor,
-        NativeWebViewContextMenuTarget target)
+        NativeWebViewContextMenuItem descriptor)
     {
         if (_environment is null)
             throw new InvalidOperationException("The WebView2 environment is unavailable.");
@@ -1766,18 +1766,54 @@ public sealed class WindowsNativeWebViewBackend
         item.IsEnabled = descriptor.IsEnabled;
         if (descriptor.Kind == NativeWebViewContextMenuItemKind.Command)
         {
-            item.CustomItemSelected += (_, _) =>
-                ContextMenuCommandInvoked?.Invoke(
-                    this,
-                    new NativeWebViewContextMenuCommandInvokedEventArgs(descriptor.Id, target));
+            _cachedContextMenuCommandIds.Add(item, descriptor.Id);
+            item.CustomItemSelected += OnCustomContextMenuItemSelected;
         }
         else if (descriptor.Kind == NativeWebViewContextMenuItemKind.Submenu)
         {
             foreach (var child in descriptor.Children)
-                item.Children.Add(CreateNativeContextMenuItem(child, target));
+                item.Children.Add(CreateNativeContextMenuItem(child));
         }
 
         return item;
+    }
+
+    private void EnsureCachedContextMenuItems(NativeWebViewContextMenuItemCollection descriptors)
+    {
+        if (ContextMenuDescriptorComparer.AreEquivalent(_cachedContextMenuDescriptors, descriptors))
+            return;
+
+        ClearCachedContextMenuItems();
+        _contextMenuIconStreams.Reset();
+        foreach (var descriptor in descriptors)
+        {
+            _cachedContextMenuDescriptors.Add(descriptor);
+            _cachedContextMenuItems.Add(CreateNativeContextMenuItem(descriptor));
+        }
+    }
+
+    private void ClearCachedContextMenuItems()
+    {
+        foreach (var item in _cachedContextMenuCommandIds.Keys)
+            item.CustomItemSelected -= OnCustomContextMenuItemSelected;
+
+        _cachedContextMenuCommandIds.Clear();
+        _cachedContextMenuItems.Clear();
+        _cachedContextMenuDescriptors.Clear();
+    }
+
+    private void OnCustomContextMenuItemSelected(object? sender, object e)
+    {
+        if (sender is not CoreWebView2ContextMenuItem item ||
+            !_cachedContextMenuCommandIds.TryGetValue(item, out var commandId) ||
+            _activeContextMenuTarget is not { } target)
+        {
+            return;
+        }
+
+        ContextMenuCommandInvoked?.Invoke(
+            this,
+            new NativeWebViewContextMenuCommandInvokedEventArgs(commandId, target));
     }
 
     public async Task<bool> InsertTextAtContextMenuTargetAsync(
@@ -1790,13 +1826,13 @@ public sealed class WindowsNativeWebViewBackend
         cancellationToken.ThrowIfCancellationRequested();
         EnsureNotDisposed();
         if (!target.IsEditable ||
-            !string.Equals(target.Token, _activeContextMenuTargetToken, StringComparison.Ordinal) ||
+            !string.Equals(target.Token, _activeContextMenuTarget?.Token, StringComparison.Ordinal) ||
             _coreWebView is null)
         {
             return false;
         }
 
-        _activeContextMenuTargetToken = null;
+        _activeContextMenuTarget = null;
         var script = CreateContextMenuInsertionScript(text);
         if (target.IsMainFrame && await ExecuteContextMenuScriptAsync(_coreWebView, script).ConfigureAwait(true))
             return true;
