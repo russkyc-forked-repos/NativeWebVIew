@@ -791,6 +791,19 @@ public interface INativeWebViewBackend : IDisposable
     void MoveFocus(NativeWebViewFocusMoveDirection direction);
 }
 
+/// <summary>Provides additive native context-menu commands and short-lived text insertion targets.</summary>
+public interface INativeWebViewContextMenuBackend
+{
+    /// <summary>Occurs when an application-provided context-menu command is selected.</summary>
+    event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
+
+    /// <summary>Inserts text into the captured target. Targets are single-use and invalid after navigation.</summary>
+    Task<bool> InsertTextAtContextMenuTargetAsync(
+        NativeWebViewContextMenuTarget target,
+        string text,
+        CancellationToken cancellationToken = default);
+}
+
 public interface INativeWebDialogBackend : IDisposable
 {
     NativeWebViewPlatform Platform { get; }

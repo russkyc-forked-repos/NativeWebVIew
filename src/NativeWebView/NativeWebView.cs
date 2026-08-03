@@ -73,6 +73,7 @@ public class NativeWebView : NativeControlHost, IDisposable
     private EventHandler<NativeWebViewNewWindowRequestedEventArgs>? _newWindowRequested;
     private EventHandler<NativeWebViewResourceRequestedEventArgs>? _webResourceRequested;
     private EventHandler<NativeWebViewContextMenuRequestedEventArgs>? _contextMenuRequested;
+    private EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? _contextMenuCommandInvoked;
     private EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? _navigationHistoryChanged;
     private EventHandler<NativeWebViewDownloadStartingEventArgs>? _downloadStarting;
     private EventHandler<NativeWebViewDownloadItemEventArgs>? _downloadStarted;
@@ -292,6 +293,13 @@ public class NativeWebView : NativeControlHost, IDisposable
         remove => _contextMenuRequested -= value;
     }
 
+    /// <summary>Occurs when an application-provided native context-menu command is selected.</summary>
+    public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked
+    {
+        add => _contextMenuCommandInvoked += value;
+        remove => _contextMenuCommandInvoked -= value;
+    }
+
     public event EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? NavigationHistoryChanged
     {
         add => _navigationHistoryChanged += value;
@@ -422,6 +430,7 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.NewWindowRequested += ForwardNewWindowRequested;
         _controller.WebResourceRequested += ForwardWebResourceRequested;
         _controller.ContextMenuRequested += ForwardContextMenuRequested;
+        _controller.ContextMenuCommandInvoked += ForwardContextMenuCommandInvoked;
         _controller.NavigationHistoryChanged += ForwardNavigationHistoryChanged;
         _controller.DownloadStarting += ForwardDownloadStarting;
         _controller.DownloadStarted += ForwardDownloadStarted;
@@ -447,6 +456,7 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.NewWindowRequested -= ForwardNewWindowRequested;
         _controller.WebResourceRequested -= ForwardWebResourceRequested;
         _controller.ContextMenuRequested -= ForwardContextMenuRequested;
+        _controller.ContextMenuCommandInvoked -= ForwardContextMenuCommandInvoked;
         _controller.NavigationHistoryChanged -= ForwardNavigationHistoryChanged;
         _controller.DownloadStarting -= ForwardDownloadStarting;
         _controller.DownloadStarted -= ForwardDownloadStarted;
@@ -466,6 +476,8 @@ public class NativeWebView : NativeControlHost, IDisposable
         _macOSHost.NavigationCompleted += ForwardNavigationCompleted;
         _macOSHost.NavigationHistoryChanged += ForwardNavigationHistoryChanged;
         _macOSHost.NewWindowRequested += ForwardNewWindowRequested;
+        _macOSHost.ContextMenuRequested += ForwardContextMenuRequested;
+        _macOSHost.ContextMenuCommandInvoked += ForwardContextMenuCommandInvoked;
         _macOSHost.NativeFocusRequested += ForwardMacOSNativeFocusRequested;
         _macOSHostEventForwardersAttached = true;
     }
@@ -479,6 +491,8 @@ public class NativeWebView : NativeControlHost, IDisposable
         _macOSHost.NavigationCompleted -= ForwardNavigationCompleted;
         _macOSHost.NavigationHistoryChanged -= ForwardNavigationHistoryChanged;
         _macOSHost.NewWindowRequested -= ForwardNewWindowRequested;
+        _macOSHost.ContextMenuRequested -= ForwardContextMenuRequested;
+        _macOSHost.ContextMenuCommandInvoked -= ForwardContextMenuCommandInvoked;
         _macOSHost.NativeFocusRequested -= ForwardMacOSNativeFocusRequested;
         _macOSHostEventForwardersAttached = false;
     }
@@ -552,6 +566,12 @@ public class NativeWebView : NativeControlHost, IDisposable
 
     private void ForwardContextMenuRequested(object? sender, NativeWebViewContextMenuRequestedEventArgs e) =>
         _contextMenuRequested?.Invoke(sender, e);
+
+    private void ForwardContextMenuCommandInvoked(object? sender, NativeWebViewContextMenuCommandInvokedEventArgs e)
+    {
+        _ = sender;
+        _contextMenuCommandInvoked?.Invoke(this, e);
+    }
 
     private void ForwardNavigationHistoryChanged(object? sender, NativeWebViewNavigationHistoryChangedEventArgs e)
     {
@@ -738,6 +758,17 @@ public class NativeWebView : NativeControlHost, IDisposable
     public Task<string?> ExecuteScriptAsync(string script, CancellationToken cancellationToken = default)
     {
         return _controller.ExecuteScriptAsync(script, cancellationToken);
+    }
+
+    /// <summary>Inserts text into a short-lived target captured by a native context menu.</summary>
+    public Task<bool> InsertTextAtContextMenuTargetAsync(
+        NativeWebViewContextMenuTarget target,
+        string text,
+        CancellationToken cancellationToken = default)
+    {
+        return _macOSHost is not null
+            ? _macOSHost.InsertTextAtContextMenuTargetAsync(target, text, cancellationToken)
+            : _controller.InsertTextAtContextMenuTargetAsync(target, text, cancellationToken);
     }
 
     public Task PostWebMessageAsJsonAsync(string message, CancellationToken cancellationToken = default)

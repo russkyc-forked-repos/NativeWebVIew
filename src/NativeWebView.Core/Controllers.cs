@@ -131,6 +131,9 @@ public sealed class NativeWebViewController : IDisposable
 
     public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested;
 
+    /// <summary>Occurs when an application-provided native context-menu command is selected.</summary>
+    public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
+
     public event EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? NavigationHistoryChanged;
 
     public event EventHandler<NativeWebViewDownloadStartingEventArgs>? DownloadStarting;
@@ -146,6 +149,20 @@ public sealed class NativeWebViewController : IDisposable
     public event EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? CoreWebView2ControllerOptionsRequested;
 
     public event EventHandler<NativeWebViewFaviconChangedEventArgs>? FaviconChanged;
+
+    /// <summary>Inserts text into a short-lived target captured by a native context menu.</summary>
+    public Task<bool> InsertTextAtContextMenuTargetAsync(
+        NativeWebViewContextMenuTarget target,
+        string text,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(text);
+        return _backend is INativeWebViewContextMenuBackend contextMenuBackend
+            ? contextMenuBackend.InsertTextAtContextMenuTargetAsync(target, text, cancellationToken)
+            : Task.FromResult(false);
+    }
 
     public ValueTask InitializeAsync(CancellationToken cancellationToken = default)
     {
@@ -401,6 +418,8 @@ public sealed class NativeWebViewController : IDisposable
         _backend.NewWindowRequested += OnNewWindowRequested;
         _backend.WebResourceRequested += OnWebResourceRequested;
         _backend.ContextMenuRequested += OnContextMenuRequested;
+        if (_backend is INativeWebViewContextMenuBackend contextMenuBackend)
+            contextMenuBackend.ContextMenuCommandInvoked += OnContextMenuCommandInvoked;
         _backend.NavigationHistoryChanged += OnNavigationHistoryChanged;
         AttachDownloadManagerEvents();
         _backend.CoreWebView2EnvironmentRequested += OnCoreWebView2EnvironmentRequested;
@@ -427,6 +446,8 @@ public sealed class NativeWebViewController : IDisposable
         _backend.NewWindowRequested -= OnNewWindowRequested;
         _backend.WebResourceRequested -= OnWebResourceRequested;
         _backend.ContextMenuRequested -= OnContextMenuRequested;
+        if (_backend is INativeWebViewContextMenuBackend contextMenuBackend)
+            contextMenuBackend.ContextMenuCommandInvoked -= OnContextMenuCommandInvoked;
         _backend.NavigationHistoryChanged -= OnNavigationHistoryChanged;
         DetachDownloadManagerEvents();
         _backend.CoreWebView2EnvironmentRequested -= OnCoreWebView2EnvironmentRequested;
@@ -634,6 +655,12 @@ public sealed class NativeWebViewController : IDisposable
         }
 
         ContextMenuRequested?.Invoke(this, e);
+    }
+
+    private void OnContextMenuCommandInvoked(object? sender, NativeWebViewContextMenuCommandInvokedEventArgs e)
+    {
+        if (!IsDisposed)
+            ContextMenuCommandInvoked?.Invoke(this, e);
     }
 
     private void OnNavigationHistoryChanged(object? sender, NativeWebViewNavigationHistoryChangedEventArgs e)

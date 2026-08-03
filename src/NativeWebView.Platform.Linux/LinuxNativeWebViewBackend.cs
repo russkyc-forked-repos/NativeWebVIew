@@ -11,7 +11,8 @@ public sealed class LinuxNativeWebViewBackend
       INativeWebViewPlatformHandleProvider,
       INativeWebViewInstanceConfigurationTarget,
       INativeWebViewNativeControlAttachment,
-      INativeWebViewFaviconProvider
+      INativeWebViewFaviconProvider,
+      INativeWebViewContextMenuBackend
 {
     private static readonly NativePlatformHandle PlaceholderPlatformHandle = new(0x3001, "XID");
     private static readonly NativePlatformHandle PlaceholderViewHandle = new(0x3002, "WebKitWebView");
@@ -70,6 +71,8 @@ public sealed class LinuxNativeWebViewBackend
     private readonly SemaphoreSlim _programmaticDownloadGate = new(1, 1);
     private readonly List<Uri> _history = [];
     private readonly List<IDisposable> _signalSubscriptions = [];
+    private readonly List<IDisposable> _contextMenuActionSubscriptions = [];
+    private readonly Dictionary<IntPtr, (string CommandId, NativeWebViewContextMenuTarget Target)> _contextMenuActions = [];
     private readonly INativeWebViewCommandManager _commandManager = NativeWebViewBackendSupport.NoopCommandManagerInstance;
     private readonly INativeWebViewCookieManager _cookieManager = NativeWebViewBackendSupport.NoopCookieManagerInstance;
     private readonly NativeWebViewDownloadManager _downloadManager;
@@ -118,6 +121,7 @@ public sealed class LinuxNativeWebViewBackend
     private string? _userAgentString;
     private Uri? _faviconUri;
     private int _faviconRefreshVersion;
+    private string? _activeContextMenuTargetToken;
 
     public LinuxNativeWebViewBackend()
     {
@@ -217,6 +221,8 @@ public sealed class LinuxNativeWebViewBackend
     public event EventHandler<NativeWebViewResourceRequestedEventArgs>? WebResourceRequested;
 
     public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested;
+
+    public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
 
     public event EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? NavigationHistoryChanged;
 
@@ -910,6 +916,7 @@ public sealed class LinuxNativeWebViewBackend
         {
             LinuxGtkDispatcher.InvokeAsync(() =>
             {
+                ClearContextMenuActions();
                 foreach (var subscription in _signalSubscriptions)
                 {
                     subscription.Dispose();
@@ -944,6 +951,9 @@ public sealed class LinuxNativeWebViewBackend
         }
         catch
         {
+            _contextMenuActionSubscriptions.Clear();
+            _contextMenuActions.Clear();
+            _activeContextMenuTargetToken = null;
             _signalSubscriptions.Clear();
             _gtkWindow = IntPtr.Zero;
             _webView = IntPtr.Zero;
@@ -1346,6 +1356,9 @@ public sealed class LinuxNativeWebViewBackend
     [SupportedOSPlatform("linux")]
     private void OnLoadChanged(IntPtr webView, LinuxNativeInterop.WebKitLoadEvent loadEvent, IntPtr userData)
     {
+        if (loadEvent is LinuxNativeInterop.WebKitLoadEvent.Started or LinuxNativeInterop.WebKitLoadEvent.Redirected)
+            _activeContextMenuTargetToken = null;
+
         switch (loadEvent)
         {
             case LinuxNativeInterop.WebKitLoadEvent.Redirected:
@@ -1698,9 +1711,105 @@ public sealed class LinuxNativeWebViewBackend
             return 1;
         }
 
-        var args = new NativeWebViewContextMenuRequestedEventArgs(0, 0);
+        ClearContextMenuActions();
+        NativeWebViewContextMenuTarget? target = null;
+        if (hitTestResult != IntPtr.Zero && LinuxNativeInterop.webkit_hit_test_result_context_is_editable(hitTestResult))
+        {
+            var token = Guid.NewGuid().ToString("N");
+            _activeContextMenuTargetToken = token;
+            target = new NativeWebViewContextMenuTarget(token, true, _currentUrl, frameUri: null, isMainFrame: false);
+        }
+        else
+        {
+            _activeContextMenuTargetToken = null;
+        }
+
+        var args = new NativeWebViewContextMenuRequestedEventArgs(0, 0, target);
         ContextMenuRequested?.Invoke(this, args);
+        if (!args.Handled && target is not null)
+        {
+            foreach (var descriptor in args.AdditionalItems)
+                AppendContextMenuItem(contextMenu, descriptor, target);
+        }
         return args.Handled ? 1 : 0;
+    }
+
+    private void AppendContextMenuItem(
+        IntPtr menu,
+        NativeWebViewContextMenuItem descriptor,
+        NativeWebViewContextMenuTarget target)
+    {
+        IntPtr item;
+        switch (descriptor.Kind)
+        {
+            case NativeWebViewContextMenuItemKind.Separator:
+                item = LinuxNativeInterop.webkit_context_menu_item_new_separator();
+                break;
+            case NativeWebViewContextMenuItemKind.Submenu:
+                var submenu = LinuxNativeInterop.webkit_context_menu_new();
+                foreach (var child in descriptor.Children)
+                    AppendContextMenuItem(submenu, child, target);
+                item = LinuxNativeInterop.webkit_context_menu_item_new_with_submenu(descriptor.Label, submenu);
+                LinuxNativeInterop.g_object_unref(submenu);
+                break;
+            case NativeWebViewContextMenuItemKind.Command:
+                var action = LinuxNativeInterop.g_simple_action_new($"nativewebview-{Guid.NewGuid():N}", IntPtr.Zero);
+                LinuxNativeInterop.g_simple_action_set_enabled(action, descriptor.IsEnabled);
+                _contextMenuActions[action] = (descriptor.Id, target);
+                _contextMenuActionSubscriptions.Add(LinuxNativeInterop.ConnectSignal(
+                    action,
+                    "activate",
+                    new LinuxNativeInterop.ActionActivateSignal(OnContextMenuActionActivated)));
+                item = LinuxNativeInterop.webkit_context_menu_item_new_from_gaction(action, descriptor.Label, IntPtr.Zero);
+                LinuxNativeInterop.g_object_unref(action);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(descriptor));
+        }
+
+        if (item == IntPtr.Zero)
+            return;
+        LinuxNativeInterop.webkit_context_menu_append(menu, item);
+        LinuxNativeInterop.g_object_unref(item);
+    }
+
+    private void OnContextMenuActionActivated(IntPtr action, IntPtr parameter, IntPtr userData)
+    {
+        if (_contextMenuActions.TryGetValue(action, out var invocation))
+        {
+            ContextMenuCommandInvoked?.Invoke(
+                this,
+                new NativeWebViewContextMenuCommandInvokedEventArgs(invocation.CommandId, invocation.Target));
+        }
+    }
+
+    private void ClearContextMenuActions()
+    {
+        foreach (var subscription in _contextMenuActionSubscriptions)
+            subscription.Dispose();
+        _contextMenuActionSubscriptions.Clear();
+        _contextMenuActions.Clear();
+    }
+
+    public async Task<bool> InsertTextAtContextMenuTargetAsync(
+        NativeWebViewContextMenuTarget target,
+        string text,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(text);
+        EnsureNotDisposed();
+        if (!target.IsEditable || !string.Equals(target.Token, _activeContextMenuTargetToken, StringComparison.Ordinal))
+            return false;
+
+        _activeContextMenuTargetToken = null;
+        if (!OperatingSystem.IsLinux() || _webView == IntPtr.Zero)
+            return false;
+
+        await LinuxGtkDispatcher.InvokeAsync(
+            () => LinuxNativeInterop.webkit_web_view_execute_editing_command_with_argument(_webView, "InsertText", text),
+            cancellationToken).ConfigureAwait(false);
+        return true;
     }
 
     private void OnCloseRequested(IntPtr webView, IntPtr userData)

@@ -153,6 +153,7 @@ internal static class LinuxNativeInterop
     private const string GdkName = "libgdk-3.so.0";
     private const string GObjectName = "libgobject-2.0.so.0";
     private const string GlibName = "libglib-2.0.so.0";
+    private const string GioName = "libgio-2.0.so.0";
     private const string WebKitName = "libwebkit2gtk-4.1.so.0";
     private const string JavaScriptCoreName = "libjavascriptcoregtk-4.1.so.0";
     private const string X11Name = "libX11.so.6";
@@ -250,6 +251,9 @@ internal static class LinuxNativeInterop
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate int ContextMenuSignal(IntPtr webView, IntPtr contextMenu, IntPtr eventHandle, IntPtr hitTestResult, IntPtr userData);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ActionActivateSignal(IntPtr action, IntPtr parameter, IntPtr userData);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void CloseSignal(IntPtr webView, IntPtr userData);
@@ -483,6 +487,43 @@ internal static class LinuxNativeInterop
 
     [DllImport(WebKitName)]
     internal static extern double webkit_web_view_get_zoom_level(IntPtr webView);
+
+    [DllImport(WebKitName)]
+    internal static extern void webkit_web_view_execute_editing_command_with_argument(
+        IntPtr webView,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string command,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string argument);
+
+    [DllImport(WebKitName)]
+    internal static extern bool webkit_hit_test_result_context_is_editable(IntPtr hitTestResult);
+
+    [DllImport(WebKitName)]
+    internal static extern IntPtr webkit_context_menu_new();
+
+    [DllImport(WebKitName)]
+    internal static extern void webkit_context_menu_append(IntPtr menu, IntPtr item);
+
+    [DllImport(WebKitName)]
+    internal static extern IntPtr webkit_context_menu_item_new_separator();
+
+    [DllImport(WebKitName)]
+    internal static extern IntPtr webkit_context_menu_item_new_from_gaction(
+        IntPtr action,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string label,
+        IntPtr target);
+
+    [DllImport(WebKitName)]
+    internal static extern IntPtr webkit_context_menu_item_new_with_submenu(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string label,
+        IntPtr submenu);
+
+    [DllImport(GioName)]
+    internal static extern IntPtr g_simple_action_new(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string name,
+        IntPtr parameterType);
+
+    [DllImport(GioName)]
+    internal static extern void g_simple_action_set_enabled(IntPtr action, bool enabled);
 
     [DllImport(WebKitName)]
     private static extern void webkit_web_view_run_javascript(
