@@ -93,6 +93,7 @@ internal sealed class IntegrationPageCatalog : IAsyncDisposable
 
         WebViewPageUri = new Uri(baseUri, "integration/bridge.html?kind=webview");
         DialogPageUri = new Uri(baseUri, "integration/bridge.html?kind=dialog");
+        DelayedDownloadUri = new Uri(baseUri, "integration/delayed-download.bin");
         AuthCallbackUri = new Uri(baseUri, "integration/auth-callback.html");
 
         var callbackTarget = new Uri($"{AuthCallbackUri.AbsoluteUri}?token=integration-ok");
@@ -105,6 +106,8 @@ internal sealed class IntegrationPageCatalog : IAsyncDisposable
     public Uri WebViewPageUri { get; }
 
     public Uri DialogPageUri { get; }
+
+    public Uri DelayedDownloadUri { get; }
 
     public Uri AuthRequestUri { get; }
 
@@ -247,6 +250,20 @@ internal sealed class IntegrationLoopbackServer : IAsyncDisposable
         }
 
         var path = ParsePath(target);
+        if (string.Equals(path, "/integration/delayed-download.bin", StringComparison.OrdinalIgnoreCase))
+        {
+            await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+            await WriteResponseAsync(
+                    stream,
+                    200,
+                    "application/octet-stream",
+                    Encoding.UTF8.GetBytes("native-web-view-delayed-download"),
+                    cancellationToken,
+                    "Content-Disposition: attachment; filename=delayed-download.bin\r\n")
+                .ConfigureAwait(false);
+            return;
+        }
+
         if (!ResourceMap.TryGetValue(path, out var resourceName))
         {
             await WriteResponseAsync(stream, 404, HtmlContentType, NotFoundPayload, cancellationToken).ConfigureAwait(false);
@@ -254,12 +271,16 @@ internal sealed class IntegrationLoopbackServer : IAsyncDisposable
         }
 
         var payload = await ReadResourceAsync(resourceName, cancellationToken).ConfigureAwait(false);
+        var additionalHeaders = string.Equals(path, "/integration/bridge.html", StringComparison.OrdinalIgnoreCase)
+            ? "Content-Security-Policy: script-src 'nonce-nativewebview-integration'; object-src 'none'; base-uri 'none'\r\n"
+            : null;
         await WriteResponseAsync(
                 stream,
                 200,
                 HtmlContentType,
                 string.Equals(method, "HEAD", StringComparison.OrdinalIgnoreCase) ? [] : payload,
-                cancellationToken)
+                cancellationToken,
+                additionalHeaders)
             .ConfigureAwait(false);
     }
 
@@ -292,7 +313,8 @@ internal sealed class IntegrationLoopbackServer : IAsyncDisposable
         int statusCode,
         string contentType,
         byte[] payload,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? additionalHeaders = null)
     {
         var reasonPhrase = statusCode switch
         {
@@ -308,8 +330,10 @@ internal sealed class IntegrationLoopbackServer : IAsyncDisposable
             .Append("Content-Type: ").AppendLine(contentType)
             .Append("Content-Length: ").AppendLine(payload.Length.ToString())
             .AppendLine("Cache-Control: no-store, max-age=0")
-            .AppendLine("Connection: close")
-            .AppendLine();
+            .AppendLine("Connection: close");
+        if (!string.IsNullOrEmpty(additionalHeaders))
+            headers.Append(additionalHeaders);
+        headers.AppendLine();
 
         var headerBytes = Encoding.ASCII.GetBytes(headers.ToString());
         await stream.WriteAsync(headerBytes, cancellationToken).ConfigureAwait(false);

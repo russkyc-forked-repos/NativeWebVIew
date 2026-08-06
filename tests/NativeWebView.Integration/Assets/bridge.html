@@ -40,7 +40,8 @@
   <p>This page is loaded by the platform integration harness.</p>
   <pre id="state"></pre>
 </main>
-<script>
+<iframe id="document-start-frame" srcdoc="<!DOCTYPE html><html><body>child</body></html>" hidden></iframe>
+<script nonce="nativewebview-integration">
   (() => {
     const params = new URLSearchParams(window.location.search);
     const kind = params.get("kind") || "webview";
@@ -49,7 +50,16 @@
       pageReady: false,
       nativeMessageCount: 0,
       lastNativeMessage: null,
-      location: window.location.href
+      location: window.location.href,
+      documentStartOrder: Array.isArray(window.__nativeWebViewDocumentStartOrder)
+        ? window.__nativeWebViewDocumentStartOrder.slice()
+        : [],
+      childDocumentStartOrder: [],
+      documentStartLexicalMarker: typeof __nativeWebViewDocumentStartLexicalMarker === "undefined"
+        ? null
+        : __nativeWebViewDocumentStartLexicalMarker,
+      childDocumentStartMainFrameMarker: null,
+      childDocumentStartErrorCount: null
     };
 
     window.__nativeWebViewIntegrationState = state;
@@ -73,12 +83,42 @@
     }
 
     const markReady = () => {
+      const childFrame = document.getElementById("document-start-frame");
+      state.childDocumentStartOrder = childFrame && childFrame.contentWindow &&
+        Array.isArray(childFrame.contentWindow.__nativeWebViewDocumentStartOrder)
+        ? childFrame.contentWindow.__nativeWebViewDocumentStartOrder.slice()
+        : [];
+      state.childDocumentStartMainFrameMarker = childFrame && childFrame.contentWindow
+        ? childFrame.contentWindow.__nativeWebViewObservedMainFrameExecutionMarker ?? null
+        : null;
+      state.childDocumentStartErrorCount = childFrame && childFrame.contentWindow
+        ? childFrame.contentWindow.__nativeWebViewDocumentStartErrorCount ?? null
+        : null;
       state.pageReady = true;
       state.location = window.location.href;
       renderState();
 
       if (bridge && typeof bridge.postMessage === "function") {
         bridge.postMessage(`page-ready:${kind}`);
+        bridge.postMessage({ kind: "page-ready-json", value: 42 });
+      }
+
+      const nativeMessageHandler = globalThis.webkit && globalThis.webkit.messageHandlers &&
+        globalThis.webkit.messageHandlers.nativeWebViewMessage;
+      if (nativeMessageHandler && typeof nativeMessageHandler.postMessage === "function") {
+        nativeMessageHandler.postMessage("direct-native-string");
+        nativeMessageHandler.postMessage({ kind: "direct-native-object", value: 42 });
+        nativeMessageHandler.postMessage(["direct-native-array", 7]);
+        nativeMessageHandler.postMessage(314159);
+        nativeMessageHandler.postMessage(false);
+        nativeMessageHandler.postMessage(null);
+        nativeMessageHandler.postMessage({
+          nativeWebViewVersion: 1,
+          kind: "json",
+          payload: "{\"directEnvelope\":true}"
+        });
+        nativeMessageHandler.postMessage("dispatcher-handler-throw");
+        nativeMessageHandler.postMessage("dispatcher-handler-after");
       }
     };
 

@@ -1112,6 +1112,24 @@ public sealed class WindowsNativeWebViewBackend
 
             _coreWebView = _controller.CoreWebView2;
             await _coreWebView.AddScriptToExecuteOnDocumentCreatedAsync(ContextMenuCaptureScript).ConfigureAwait(true);
+            if (_instanceConfiguration.DocumentStartScripts.Any(
+                    static script => script.FrameScope == NativeWebViewScriptFrameScope.MainFrame))
+            {
+                var bootstrapRegistrationId = await _coreWebView
+                    .AddScriptToExecuteOnDocumentCreatedAsync(
+                        WindowsDocumentStartScriptSourceBuilder.MainFrameBootstrapSource)
+                    .ConfigureAwait(true);
+                if (string.IsNullOrWhiteSpace(bootstrapRegistrationId))
+                    throw new InvalidOperationException("WebView2 did not register the main-frame script bootstrap.");
+            }
+
+            foreach (var documentStartScript in _instanceConfiguration.DocumentStartScripts)
+            {
+                var source = WindowsDocumentStartScriptSourceBuilder.Build(documentStartScript);
+                var registrationId = await _coreWebView.AddScriptToExecuteOnDocumentCreatedAsync(source).ConfigureAwait(true);
+                if (string.IsNullOrWhiteSpace(registrationId))
+                    throw new InvalidOperationException("WebView2 did not register a requested document-start script.");
+            }
             CaptureRuntimeHandles();
             AttachRuntimeEvents();
             ApplyRuntimeSettings();

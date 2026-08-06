@@ -89,7 +89,7 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
     public MacOSNativeWebDialogBackend()
     {
         Platform = NativeWebViewPlatform.MacOS;
-        Features = MacOSPlatformFeatures.Instance;
+        Features = MacOSPlatformFeatures.DialogInstance;
         _useNative = OperatingSystem.IsMacOS();
         IsDevToolsEnabled = Features.Supports(NativeWebViewFeature.DevTools);
         IsContextMenuEnabled = Features.Supports(NativeWebViewFeature.ContextMenu);

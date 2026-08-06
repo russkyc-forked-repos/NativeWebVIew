@@ -7,7 +7,7 @@ public sealed class MacOSWebAuthenticationBrokerBackend : IWebAuthenticationBrok
     public MacOSWebAuthenticationBrokerBackend()
     {
         Platform = NativeWebViewPlatform.MacOS;
-        Features = MacOSPlatformFeatures.Instance;
+        Features = MacOSPlatformFeatures.AuthenticationInstance;
     }
 
     public NativeWebViewPlatform Platform { get; }

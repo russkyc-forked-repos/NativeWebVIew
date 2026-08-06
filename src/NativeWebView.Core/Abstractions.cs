@@ -42,7 +42,47 @@ public enum NativeWebViewFeature
     RenderFrameCapture = 1 << 22,
     ProxyConfiguration = 1 << 23,
     Favicon = 1 << 24,
-    Downloads = 1 << 25
+    Downloads = 1 << 25,
+    /// <summary>Injects configured scripts before page scripts run.</summary>
+    DocumentStartScriptInjection = 1 << 26
+}
+
+/// <summary>Specifies which document frames receive a document-start script.</summary>
+public enum NativeWebViewScriptFrameScope
+{
+    /// <summary>Injects the script into the main frame only.</summary>
+    MainFrame = 0,
+    /// <summary>Injects the script into the main frame and all child frames.</summary>
+    AllFrames
+}
+
+/// <summary>Describes JavaScript that must be registered before the first navigation.</summary>
+public sealed class NativeWebViewDocumentStartScript
+{
+    /// <summary>Creates a document-start script.</summary>
+    /// <param name="source">The non-empty JavaScript source.</param>
+    /// <param name="frameScope">The frames in which the script runs.</param>
+    public NativeWebViewDocumentStartScript(
+        string source,
+        NativeWebViewScriptFrameScope frameScope = NativeWebViewScriptFrameScope.MainFrame)
+    {
+        if (string.IsNullOrWhiteSpace(source))
+            throw new ArgumentException("Document-start script source cannot be empty.", nameof(source));
+        if (!Enum.IsDefined(frameScope))
+            throw new ArgumentOutOfRangeException(nameof(frameScope));
+
+        Source = source;
+        FrameScope = frameScope;
+    }
+
+    /// <summary>Gets the JavaScript source.</summary>
+    public string Source { get; }
+
+    /// <summary>Gets the frames in which the script runs.</summary>
+    public NativeWebViewScriptFrameScope FrameScope { get; }
+
+    /// <summary>Creates an independent copy of this script descriptor.</summary>
+    public NativeWebViewDocumentStartScript Clone() => new(Source, FrameScope);
 }
 
 [Flags]
@@ -397,13 +437,34 @@ public sealed class NativeWebViewInstanceConfiguration
 
     public NativeWebViewControllerOptions ControllerOptions { get; set; } = new();
 
+    /// <summary>
+    /// Gets scripts registered in order before native host creation, initialization, or navigation begins.
+    /// </summary>
+    public Collection<NativeWebViewDocumentStartScript> DocumentStartScripts { get; } =
+        new NativeWebViewDocumentStartScriptCollection();
+
+    internal event Action? DocumentStartScriptsChanging
+    {
+        add => ((NativeWebViewDocumentStartScriptCollection)DocumentStartScripts).Changing += value;
+        remove => ((NativeWebViewDocumentStartScriptCollection)DocumentStartScripts).Changing -= value;
+    }
+
+    internal event Action? DocumentStartScriptsChanged
+    {
+        add => ((NativeWebViewDocumentStartScriptCollection)DocumentStartScripts).Changed += value;
+        remove => ((NativeWebViewDocumentStartScriptCollection)DocumentStartScripts).Changed -= value;
+    }
+
     public NativeWebViewInstanceConfiguration Clone()
     {
-        return new NativeWebViewInstanceConfiguration
+        var clone = new NativeWebViewInstanceConfiguration
         {
             EnvironmentOptions = EnvironmentOptions?.Clone() ?? new NativeWebViewEnvironmentOptions(),
             ControllerOptions = ControllerOptions?.Clone() ?? new NativeWebViewControllerOptions(),
         };
+        foreach (var script in DocumentStartScripts)
+            clone.DocumentStartScripts.Add(script.Clone());
+        return clone;
     }
 
     public void ApplyEnvironmentOptions(NativeWebViewEnvironmentOptions options)
@@ -416,6 +477,79 @@ public sealed class NativeWebViewInstanceConfiguration
     {
         ArgumentNullException.ThrowIfNull(options);
         (ControllerOptions ?? new NativeWebViewControllerOptions()).ApplyTo(options);
+    }
+}
+
+internal sealed class NativeWebViewDocumentStartScriptCollection : Collection<NativeWebViewDocumentStartScript>
+{
+    internal event Action? Changing;
+
+    internal event Action? Changed;
+
+    protected override void InsertItem(int index, NativeWebViewDocumentStartScript item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        Changing?.Invoke();
+        base.InsertItem(index, item);
+        try
+        {
+            Changed?.Invoke();
+        }
+        catch
+        {
+            base.RemoveItem(index);
+            throw;
+        }
+    }
+
+    protected override void SetItem(int index, NativeWebViewDocumentStartScript item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        Changing?.Invoke();
+        var previous = this[index];
+        base.SetItem(index, item);
+        try
+        {
+            Changed?.Invoke();
+        }
+        catch
+        {
+            base.SetItem(index, previous);
+            throw;
+        }
+    }
+
+    protected override void RemoveItem(int index)
+    {
+        Changing?.Invoke();
+        var previous = this[index];
+        base.RemoveItem(index);
+        try
+        {
+            Changed?.Invoke();
+        }
+        catch
+        {
+            base.InsertItem(index, previous);
+            throw;
+        }
+    }
+
+    protected override void ClearItems()
+    {
+        Changing?.Invoke();
+        var previous = this.ToArray();
+        base.ClearItems();
+        try
+        {
+            Changed?.Invoke();
+        }
+        catch
+        {
+            foreach (var item in previous)
+                base.InsertItem(Count, item);
+            throw;
+        }
     }
 }
 

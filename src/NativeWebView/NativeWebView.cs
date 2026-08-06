@@ -125,7 +125,6 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.CoreWebView2ControllerOptionsRequested += OnCoreWebView2ControllerOptionsRequestedInternal;
         AttachControllerEventForwarders();
         AttachMacOSHostEventForwarders();
-        ApplyInstanceConfigurationToBackend();
     }
 
     public NativeWebViewPlatform Platform => _controller.Platform;
@@ -141,7 +140,6 @@ public class NativeWebView : NativeControlHost, IDisposable
         {
             ArgumentNullException.ThrowIfNull(value);
             _instance.ApplyInstanceConfiguration(value);
-            ApplyInstanceConfigurationToBackend();
         }
     }
 
@@ -478,6 +476,7 @@ public class NativeWebView : NativeControlHost, IDisposable
         _macOSHost.NewWindowRequested += ForwardNewWindowRequested;
         _macOSHost.ContextMenuRequested += ForwardContextMenuRequested;
         _macOSHost.ContextMenuCommandInvoked += ForwardContextMenuCommandInvoked;
+        _macOSHost.WebMessageReceived += ForwardWebMessageReceived;
         _macOSHost.NativeFocusRequested += ForwardMacOSNativeFocusRequested;
         _macOSHostEventForwardersAttached = true;
     }
@@ -493,6 +492,7 @@ public class NativeWebView : NativeControlHost, IDisposable
         _macOSHost.NewWindowRequested -= ForwardNewWindowRequested;
         _macOSHost.ContextMenuRequested -= ForwardContextMenuRequested;
         _macOSHost.ContextMenuCommandInvoked -= ForwardContextMenuCommandInvoked;
+        _macOSHost.WebMessageReceived -= ForwardWebMessageReceived;
         _macOSHost.NativeFocusRequested -= ForwardMacOSNativeFocusRequested;
         _macOSHostEventForwardersAttached = false;
     }
@@ -757,7 +757,9 @@ public class NativeWebView : NativeControlHost, IDisposable
 
     public Task<string?> ExecuteScriptAsync(string script, CancellationToken cancellationToken = default)
     {
-        return _controller.ExecuteScriptAsync(script, cancellationToken);
+        return _macOSHost is not null
+            ? _macOSHost.ExecuteScriptAsync(script, cancellationToken)
+            : _controller.ExecuteScriptAsync(script, cancellationToken);
     }
 
     /// <summary>Inserts text into a short-lived target captured by a native context menu.</summary>
@@ -960,6 +962,7 @@ public class NativeWebView : NativeControlHost, IDisposable
                 _instance.InstanceConfiguration,
                 downloadManager as NativeWebViewDownloadManager);
             _instance.MacOSHost = _macOSHost;
+            _instance.CommitInstanceConfiguration();
             AttachMacOSHostEventForwarders();
 
             _macOSHost.SetUserAgent(_controller.UserAgentString);
@@ -1205,14 +1208,6 @@ public class NativeWebView : NativeControlHost, IDisposable
         }
 
         _macOSHost = null;
-    }
-
-    private void ApplyInstanceConfigurationToBackend()
-    {
-        if (_controller.TryGetBackend<INativeWebViewInstanceConfigurationTarget>(out var target))
-        {
-            target.ApplyInstanceConfiguration(_instance.InstanceConfiguration.Clone());
-        }
     }
 
     private bool TryGetNativeControlAttachment(

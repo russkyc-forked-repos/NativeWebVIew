@@ -93,6 +93,10 @@ using var webView = new NativeWebView(backend);
 webView.InstanceConfiguration.EnvironmentOptions.UserDataFolder = "./artifacts/example-userdata";
 webView.InstanceConfiguration.EnvironmentOptions.CacheFolder = "./artifacts/example-cache";
 webView.InstanceConfiguration.ControllerOptions.ProfileName = "example-profile";
+webView.InstanceConfiguration.DocumentStartScripts.Add(
+    new NativeWebViewDocumentStartScript(
+        "globalThis.applicationBridgeReady = true;",
+        NativeWebViewScriptFrameScope.MainFrame));
 await webView.InitializeAsync();
 webView.RenderMode = NativeWebViewRenderMode.GpuSurface;
 webView.RenderFramesPerSecond = 30;
@@ -100,6 +104,7 @@ webView.Navigate("https://example.com");
 ```
 
 Each `NativeWebView` control instance keeps its own `InstanceConfiguration`, so multiple hosted views can carry different environment/controller defaults in the same process.
+Document-start scripts are applied immediately when the collection changes and run in collection order. Configure them before the native host is created, initialization starts, or the first navigation begins; later assignment or collection mutation throws `InvalidOperationException`.
 
 Use `NativeWebDialog` when the browser should live in a separate desktop window, and `WebAuthenticationBroker` when the main goal is an auth callback flow rather than general browsing. `NativeWebDialog` is intentionally desktop-only in the current repo runtime; `WebAuthenticationBroker` is implemented on Windows, macOS, Linux, iOS, Android, and Browser with the platform-specific limitations documented below.
 
