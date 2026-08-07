@@ -11,7 +11,7 @@ public sealed class MacOSNativeWebViewBackend : NativeWebViewBackendStubBase, IN
     private readonly NativeWebViewDownloadManager _downloadManager = new();
 
     public MacOSNativeWebViewBackend()
-        : base(NativeWebViewPlatform.MacOS, MacOSPlatformFeatures.Instance)
+        : base(NativeWebViewPlatform.MacOS, MacOSPlatformFeatures.EmbeddedInstance)
     {
     }
 

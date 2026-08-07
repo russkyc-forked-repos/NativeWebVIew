@@ -27,9 +27,16 @@ internal static class MacOSPlatformFeatures
         NativeWebViewFeature.Favicon |
         NativeWebViewFeature.Downloads;
 
-    public static IWebViewPlatformFeatures Instance => new WebViewPlatformFeatures(
+    public static IWebViewPlatformFeatures EmbeddedInstance => Create(
+        BaseFeatures | NativeWebViewFeature.DocumentStartScriptInjection);
+
+    public static IWebViewPlatformFeatures DialogInstance => Create(BaseFeatures);
+
+    public static IWebViewPlatformFeatures AuthenticationInstance => Create(BaseFeatures);
+
+    private static IWebViewPlatformFeatures Create(NativeWebViewFeature features) => new WebViewPlatformFeatures(
         NativeWebViewPlatform.MacOS,
-        BaseFeatures |
+        features |
         (OperatingSystem.IsMacOSVersionAtLeast(14)
             ? NativeWebViewFeature.ProxyConfiguration
             : NativeWebViewFeature.None));

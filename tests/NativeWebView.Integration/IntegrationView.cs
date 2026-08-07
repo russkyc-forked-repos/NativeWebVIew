@@ -7,6 +7,7 @@ using Avalonia.Layout;
 using Avalonia.Media;
 using Avalonia.Threading;
 using NativeWebView.Auth;
+using NativeWebView.Controls;
 using NativeWebView.Core;
 using NativeWebView.Dialog;
 using NativeWebView.Interop;
@@ -16,6 +17,7 @@ namespace NativeWebView.Integration;
 internal sealed class IntegrationView : UserControl
 {
     private readonly NativeWebView.Controls.NativeWebView _webView;
+    private readonly Grid _rootGrid;
     private readonly TextBlock _statusBlock;
     private readonly TextBox _logBox;
     private readonly StringBuilder _logBuffer = new();
@@ -44,6 +46,25 @@ internal sealed class IntegrationView : UserControl
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Stretch,
         };
+        if (_webView.Features.Supports(NativeWebViewFeature.DocumentStartScriptInjection))
+        {
+            _webView.InstanceConfiguration.DocumentStartScripts.Add(
+                new NativeWebViewDocumentStartScript(
+                    "globalThis.__nativeWebViewDocumentStartErrorCount = 0; globalThis.addEventListener('error', () => { globalThis.__nativeWebViewDocumentStartErrorCount += 1; });",
+                    NativeWebViewScriptFrameScope.AllFrames));
+            _webView.InstanceConfiguration.DocumentStartScripts.Add(
+                new NativeWebViewDocumentStartScript(
+                    "let __nativeWebViewDocumentStartLexicalMarker = 'main-first'; globalThis.__nativeWebViewMainFrameExecutionMarker = 'main-only';",
+                    NativeWebViewScriptFrameScope.MainFrame));
+            _webView.InstanceConfiguration.DocumentStartScripts.Add(
+                new NativeWebViewDocumentStartScript(
+                    "globalThis.__nativeWebViewDocumentStartOrder = globalThis.__nativeWebViewDocumentStartOrder || []; globalThis.__nativeWebViewDocumentStartOrder.push(__nativeWebViewDocumentStartLexicalMarker);",
+                    NativeWebViewScriptFrameScope.MainFrame));
+            _webView.InstanceConfiguration.DocumentStartScripts.Add(
+                new NativeWebViewDocumentStartScript(
+                    "globalThis.__nativeWebViewObservedMainFrameExecutionMarker = globalThis.__nativeWebViewMainFrameExecutionMarker ?? null; globalThis.__nativeWebViewDocumentStartOrder = globalThis.__nativeWebViewDocumentStartOrder || []; globalThis.__nativeWebViewDocumentStartOrder.push('all-second');",
+                    NativeWebViewScriptFrameScope.AllFrames));
+        }
 
         var headerBorder = new Border
         {
@@ -72,7 +93,7 @@ internal sealed class IntegrationView : UserControl
         Grid.SetRow(webViewBorder, 1);
         Grid.SetRow(logBorder, 2);
 
-        Content = new Grid
+        _rootGrid = new Grid
         {
             RowDefinitions = new RowDefinitions("Auto,*,220"),
             Margin = new Thickness(16),
@@ -83,6 +104,7 @@ internal sealed class IntegrationView : UserControl
                 logBorder,
             },
         };
+        Content = _rootGrid;
     }
 
     protected override void OnAttachedToVisualTree(Avalonia.VisualTreeAttachmentEventArgs e)
@@ -153,6 +175,11 @@ internal sealed class IntegrationView : UserControl
         var initializedCompletion = new TaskCompletionSource<CoreWebViewInitializedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
         var navigationCompletion = new TaskCompletionSource<NativeWebViewNavigationCompletedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
         var pageReadyCompletion = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pageJsonCompletion = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var directMacOsMessagesCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dispatcherExceptionCompletion = new TaskCompletionSource<Exception>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var messageAfterDispatcherExceptionCompletion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var directMacOsMessageKinds = new HashSet<string>(StringComparer.Ordinal);
 
         void OnInitialized(object? sender, CoreWebViewInitializedEventArgs e)
         {
@@ -174,11 +201,57 @@ internal sealed class IntegrationView : UserControl
             {
                 pageReadyCompletion.TrySetResult(message!);
             }
+            if (e.Json?.Contains("\"kind\":\"page-ready-json\"", StringComparison.Ordinal) == true)
+            {
+                pageJsonCompletion.TrySetResult(e.Json);
+            }
+            if (platform == NativeWebViewPlatform.MacOS &&
+                e.Json?.Contains("\"directEnvelope\":true", StringComparison.Ordinal) == true)
+            {
+                directMacOsMessagesCompletion.TrySetException(
+                    new InvalidOperationException("A directly posted Foundation object was incorrectly classified as a JSON envelope."));
+            }
+            if (platform == NativeWebViewPlatform.MacOS &&
+                e.Json is null &&
+                TryClassifyDirectMacOsMessage(e.Message, out var directMessageKind))
+            {
+                directMacOsMessageKinds.Add(directMessageKind);
+                if (directMacOsMessageKinds.Count == 7)
+                    directMacOsMessagesCompletion.TrySetResult(true);
+            }
+            if (string.Equals(e.Message, "dispatcher-handler-after", StringComparison.Ordinal))
+                messageAfterDispatcherExceptionCompletion.TrySetResult(true);
+        }
+
+        void ThrowFromWebMessageHandler(object? sender, NativeWebViewMessageReceivedEventArgs e)
+        {
+            if (!string.Equals(e.Message, "dispatcher-handler-throw", StringComparison.Ordinal))
+                return;
+
+            _webView.WebMessageReceived -= ThrowFromWebMessageHandler;
+            throw new InvalidOperationException("macOS dispatcher-isolated web-message handler failure");
+        }
+
+        void OnDispatcherUnhandledException(object? sender, DispatcherUnhandledExceptionEventArgs e)
+        {
+            if (e.Exception is not InvalidOperationException exception ||
+                !string.Equals(exception.Message, "macOS dispatcher-isolated web-message handler failure", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            e.Handled = true;
+            dispatcherExceptionCompletion.TrySetResult(exception);
         }
 
         _webView.CoreWebView2Initialized += OnInitialized;
         _webView.NavigationCompleted += OnNavigationCompleted;
         _webView.WebMessageReceived += OnWebMessageReceived;
+        if (platform == NativeWebViewPlatform.MacOS)
+        {
+            _webView.WebMessageReceived += ThrowFromWebMessageHandler;
+            Dispatcher.UIThread.UnhandledException += OnDispatcherUnhandledException;
+        }
 
         try
         {
@@ -261,47 +334,122 @@ internal sealed class IntegrationView : UserControl
                 }
             }
 
-            if (platform != NativeWebViewPlatform.MacOS)
+            var pageReady = await EvaluateBooleanAsync(
+                    _webView.ExecuteScriptAsync,
+                    "window.__nativeWebViewIntegrationState && window.__nativeWebViewIntegrationState.pageReady",
+                    cancellationToken)
+                .ConfigureAwait(true);
+
+            if (!pageReady)
             {
-                var pageReady = await EvaluateBooleanAsync(
+                throw new InvalidOperationException("Embedded page did not report a ready state.");
+            }
+
+            var location = await EvaluateStringAsync(_webView.ExecuteScriptAsync, "window.location.href", cancellationToken)
+                .ConfigureAwait(true);
+
+            if (!Uri.TryCreate(location, UriKind.Absolute, out var actualLocation) ||
+                actualLocation is null ||
+                !AreSameUri(actualLocation, pages.WebViewPageUri))
+            {
+                throw new InvalidOperationException($"Unexpected embedded page location '{location ?? "<null>"}'.");
+            }
+
+            scenario.Evidence.Add($"location:{location}");
+
+            if (_webView.Features.Supports(NativeWebViewFeature.DocumentStartScriptInjection))
+            {
+                var mainFrameOrder = await EvaluateStringAsync(
                         _webView.ExecuteScriptAsync,
-                        "window.__nativeWebViewIntegrationState && window.__nativeWebViewIntegrationState.pageReady",
+                        "JSON.stringify(window.__nativeWebViewIntegrationState.documentStartOrder)",
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                var childFrameOrder = await EvaluateStringAsync(
+                        _webView.ExecuteScriptAsync,
+                        "JSON.stringify(window.__nativeWebViewIntegrationState.childDocumentStartOrder)",
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                var mainLexicalMarker = await EvaluateStringAsync(
+                        _webView.ExecuteScriptAsync,
+                        "window.__nativeWebViewIntegrationState.documentStartLexicalMarker",
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                var childMainFrameMarker = await EvaluateStringAsync(
+                        _webView.ExecuteScriptAsync,
+                        "window.__nativeWebViewIntegrationState.childDocumentStartMainFrameMarker",
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                var childErrorCount = await EvaluateStringAsync(
+                        _webView.ExecuteScriptAsync,
+                        "window.__nativeWebViewIntegrationState.childDocumentStartErrorCount",
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                if (!string.Equals(mainFrameOrder, "[\"main-first\",\"all-second\"]", StringComparison.Ordinal) ||
+                    !string.Equals(childFrameOrder, "[\"all-second\"]", StringComparison.Ordinal) ||
+                    !string.Equals(mainLexicalMarker, "main-first", StringComparison.Ordinal) ||
+                    childMainFrameMarker is not null ||
+                    !string.Equals(childErrorCount, "0", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"Unexpected document-start state. Main={mainFrameOrder ?? "<null>"}, child={childFrameOrder ?? "<null>"}, main lexical={mainLexicalMarker ?? "<null>"}, child main-frame marker={childMainFrameMarker ?? "<null>"}, child errors={childErrorCount ?? "<null>"}.");
+                }
+
+                scenario.Evidence.Add($"document-start:{mainFrameOrder}:{childFrameOrder}:lexical={mainLexicalMarker}:child-errors={childErrorCount}");
+            }
+
+            if (platform == NativeWebViewPlatform.MacOS)
+            {
+                await pageReadyCompletion.Task
+                    .WaitAsync(TimeSpan.FromSeconds(20), cancellationToken)
+                    .ConfigureAwait(true);
+                var pageJson = await pageJsonCompletion.Task
+                    .WaitAsync(TimeSpan.FromSeconds(20), cancellationToken)
+                    .ConfigureAwait(true);
+                using (var messageDocument = JsonDocument.Parse(pageJson))
+                {
+                    if (!string.Equals(
+                            messageDocument.RootElement.GetProperty("kind").GetString(),
+                            "page-ready-json",
+                            StringComparison.Ordinal) ||
+                        messageDocument.RootElement.GetProperty("value").GetInt32() != 42)
+                    {
+                        throw new InvalidOperationException($"Unexpected macOS JSON web message '{pageJson}'.");
+                    }
+                }
+
+                await directMacOsMessagesCompletion.Task
+                    .WaitAsync(TimeSpan.FromSeconds(20), cancellationToken)
+                    .ConfigureAwait(true);
+                await dispatcherExceptionCompletion.Task
+                    .WaitAsync(TimeSpan.FromSeconds(20), cancellationToken)
+                    .ConfigureAwait(true);
+                await messageAfterDispatcherExceptionCompletion.Task
+                    .WaitAsync(TimeSpan.FromSeconds(20), cancellationToken)
+                    .ConfigureAwait(true);
+
+                await VerifyMacOsScriptExecutionAsync(cancellationToken).ConfigureAwait(true);
+                await VerifyMacOsHostLifecycleAsync(pages, cancellationToken).ConfigureAwait(true);
+                scenario.Evidence.Add("macos-web-message:string-json-direct-foundation-types-envelope-object");
+                scenario.Evidence.Add("macos-web-message:dispatcher-exception-isolated-and-recovered");
+                scenario.Evidence.Add("macos-script-execution:result-error-cancellation-order");
+                scenario.Evidence.Add("macos-native-host:retained-download-block-dispose-recreate-collectible");
+            }
+
+            if (platform is NativeWebViewPlatform.Browser or NativeWebViewPlatform.MacOS)
+            {
+                scenario.Evidence.Add($"message-channel:not-asserted-{platform.ToString().ToLowerInvariant()}-runtime");
+            }
+            else
+            {
+                await _webView.PostWebMessageAsStringAsync("native-ping", cancellationToken).ConfigureAwait(true);
+                var lastNativeMessage = await WaitForStringResultAsync(
+                        _webView.ExecuteScriptAsync,
+                        "window.__nativeWebViewIntegrationState && window.__nativeWebViewIntegrationState.lastNativeMessage",
+                        "native-ping",
                         cancellationToken)
                     .ConfigureAwait(true);
 
-                if (!pageReady)
-                {
-                    throw new InvalidOperationException("Embedded page did not report a ready state.");
-                }
-
-                var location = await EvaluateStringAsync(_webView.ExecuteScriptAsync, "window.location.href", cancellationToken)
-                    .ConfigureAwait(true);
-
-                if (!Uri.TryCreate(location, UriKind.Absolute, out var actualLocation) ||
-                    actualLocation is null ||
-                    !AreSameUri(actualLocation, pages.WebViewPageUri))
-                {
-                    throw new InvalidOperationException($"Unexpected embedded page location '{location ?? "<null>"}'.");
-                }
-
-                scenario.Evidence.Add($"location:{location}");
-
-                if (platform == NativeWebViewPlatform.Browser)
-                {
-                    scenario.Evidence.Add("message-channel:not-asserted-browser-runtime");
-                }
-                else
-                {
-                    await _webView.PostWebMessageAsStringAsync("native-ping", cancellationToken).ConfigureAwait(true);
-                    var lastNativeMessage = await WaitForStringResultAsync(
-                            _webView.ExecuteScriptAsync,
-                            "window.__nativeWebViewIntegrationState && window.__nativeWebViewIntegrationState.lastNativeMessage",
-                            "native-ping",
-                            cancellationToken)
-                        .ConfigureAwait(true);
-
-                    scenario.Evidence.Add($"native-message:{lastNativeMessage}");
-                }
+                scenario.Evidence.Add($"native-message:{lastNativeMessage}");
             }
 
             scenario.Passed = true;
@@ -320,9 +468,304 @@ internal sealed class IntegrationView : UserControl
             _webView.CoreWebView2Initialized -= OnInitialized;
             _webView.NavigationCompleted -= OnNavigationCompleted;
             _webView.WebMessageReceived -= OnWebMessageReceived;
+            _webView.WebMessageReceived -= ThrowFromWebMessageHandler;
+            Dispatcher.UIThread.UnhandledException -= OnDispatcherUnhandledException;
         }
 
         return scenario;
+    }
+
+    private static bool TryClassifyDirectMacOsMessage(string? message, out string kind)
+    {
+        kind = message switch
+        {
+            "direct-native-string" => "string",
+            "314159" => "number",
+            "false" => "boolean",
+            "null" => "null",
+            _ => string.Empty,
+        };
+        if (kind.Length != 0)
+            return true;
+
+        if (message is null)
+            return false;
+
+        try
+        {
+            using var document = JsonDocument.Parse(message);
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("nativeWebViewVersion", out var version) &&
+                version.GetInt32() == 1 &&
+                document.RootElement.TryGetProperty("kind", out var envelopeKind) &&
+                string.Equals(envelopeKind.GetString(), "json", StringComparison.Ordinal) &&
+                document.RootElement.TryGetProperty("payload", out var envelopePayload) &&
+                string.Equals(envelopePayload.GetString(), "{\"directEnvelope\":true}", StringComparison.Ordinal))
+            {
+                kind = "envelope-object";
+                return true;
+            }
+
+            if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                document.RootElement.TryGetProperty("kind", out var objectKind) &&
+                string.Equals(objectKind.GetString(), "direct-native-object", StringComparison.Ordinal))
+            {
+                kind = "object";
+                return true;
+            }
+
+            if (document.RootElement.ValueKind == JsonValueKind.Array &&
+                document.RootElement.GetArrayLength() == 2 &&
+                string.Equals(document.RootElement[0].GetString(), "direct-native-array", StringComparison.Ordinal) &&
+                document.RootElement[1].GetInt32() == 7)
+            {
+                kind = "array";
+                return true;
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return false;
+    }
+
+    private async Task VerifyMacOsScriptExecutionAsync(CancellationToken cancellationToken)
+    {
+        var objectResult = await _webView.ExecuteScriptAsync("({ value: 42, ok: true })", cancellationToken).ConfigureAwait(true);
+        using (var document = JsonDocument.Parse(objectResult ?? throw new InvalidOperationException("macOS object script returned null.")))
+        {
+            if (document.RootElement.GetProperty("value").GetInt32() != 42 ||
+                !document.RootElement.GetProperty("ok").GetBoolean())
+            {
+                throw new InvalidOperationException($"Unexpected macOS object script result '{objectResult}'.");
+            }
+        }
+
+        await _webView.ExecuteScriptAsync("window.__nativeWebViewAwaitOrder = 'complete'", cancellationToken).ConfigureAwait(true);
+        var orderedResult = await EvaluateStringAsync(
+                _webView.ExecuteScriptAsync,
+                "window.__nativeWebViewAwaitOrder",
+                cancellationToken)
+            .ConfigureAwait(true);
+        if (!string.Equals(orderedResult, "complete", StringComparison.Ordinal))
+            throw new InvalidOperationException("macOS script completion did not preserve await ordering.");
+
+        try
+        {
+            _ = await _webView.ExecuteScriptAsync("throw new Error('integration-script-error')", cancellationToken).ConfigureAwait(true);
+            throw new InvalidOperationException("macOS JavaScript errors were not propagated.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("integration-script-error", StringComparison.OrdinalIgnoreCase))
+        {
+        }
+
+        using var canceled = new CancellationTokenSource();
+        canceled.Cancel();
+        await AssertCanceledAsync(() => _webView.ExecuteScriptAsync("1 + 1", canceled.Token)).ConfigureAwait(true);
+
+        MacOSScriptEvaluationSetupRollbackSnapshot? rollbackSnapshot = null;
+        MacOSNativeWebViewHostTestHooks.CancellationRegistrationFactory =
+            static (_, _, _) => throw new ObjectDisposedException("integration-cancellation-registration");
+        MacOSNativeWebViewHostTestHooks.ScriptEvaluationSetupRolledBack =
+            snapshot => rollbackSnapshot = snapshot;
+        try
+        {
+            try
+            {
+                _ = await _webView.ExecuteScriptAsync("2 + 2", cancellationToken).ConfigureAwait(true);
+                throw new InvalidOperationException("macOS evaluation setup did not surface the injected registration failure.");
+            }
+            catch (ObjectDisposedException ex) when (
+                string.Equals(ex.ObjectName, "integration-cancellation-registration", StringComparison.Ordinal))
+            {
+            }
+        }
+        finally
+        {
+            MacOSNativeWebViewHostTestHooks.CancellationRegistrationFactory = null;
+            MacOSNativeWebViewHostTestHooks.ScriptEvaluationSetupRolledBack = null;
+        }
+
+        if (rollbackSnapshot is not
+            {
+                PendingEntryRemoved: true,
+                ManagedCleanupCompleted: true,
+                CreatorBlockReleased: true,
+                ManagedOwnershipReleased: true,
+                NativeOwnershipCount: 0,
+                ManagedHandleReleased: true,
+            })
+        {
+            throw new InvalidOperationException(
+                $"macOS evaluation setup rollback left native state behind: {rollbackSnapshot?.ToString() ?? "no snapshot"}.");
+        }
+
+        var evaluationAfterSetupFailure = await _webView.ExecuteScriptAsync("6 * 7", cancellationToken).ConfigureAwait(true);
+        if (!string.Equals(evaluationAfterSetupFailure, "42", StringComparison.Ordinal))
+            throw new InvalidOperationException("macOS evaluation setup did not recover after registration rollback.");
+
+        using var canceledAfterDispatch = new CancellationTokenSource();
+        var delayedEvaluation = _webView.ExecuteScriptAsync(
+            "(() => { window.__nativeWebViewCanceledEvaluation = 'started'; const deadline = Date.now() + 300; while (Date.now() < deadline) {} window.__nativeWebViewCanceledEvaluation = 'finished'; return true; })()",
+            canceledAfterDispatch.Token);
+        canceledAfterDispatch.Cancel();
+        await AssertCanceledAsync(() => delayedEvaluation).ConfigureAwait(true);
+        var cancellationMarker = await WaitForStringResultAsync(
+                _webView.ExecuteScriptAsync,
+                "window.__nativeWebViewCanceledEvaluation",
+                "finished",
+                cancellationToken)
+            .ConfigureAwait(true);
+        if (!string.Equals(cancellationMarker, "finished", StringComparison.Ordinal))
+            throw new InvalidOperationException("macOS canceled script did not complete its native callback lifecycle.");
+    }
+
+    private async Task VerifyMacOsHostLifecycleAsync(
+        IntegrationPageCatalog pages,
+        CancellationToken cancellationToken)
+    {
+        var references = new List<WeakReference>();
+        var nativeDispatchCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var nativeCallbackCompletion =
+            new TaskCompletionSource<MacOSStartDownloadCompletionSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retainedCompletionBlock = IntPtr.Zero;
+
+        MacOSNativeWebViewHostTestHooks.StartDownloadDispatch = (view, request, block) =>
+        {
+            if (view == IntPtr.Zero || request == IntPtr.Zero || block == IntPtr.Zero)
+                throw new InvalidOperationException("macOS direct-download dispatch received an invalid native argument.");
+            if (retainedCompletionBlock != IntPtr.Zero)
+                throw new InvalidOperationException("macOS direct-download dispatch ran more than once.");
+
+            retainedCompletionBlock = MacOSNativeWebViewHost.RetainStartDownloadCompletionBlockForTests(block);
+            if (retainedCompletionBlock == IntPtr.Zero)
+                throw new InvalidOperationException("macOS direct-download completion block could not be retained.");
+
+            nativeDispatchCompletion.TrySetResult();
+        };
+        MacOSNativeWebViewHostTestHooks.StartDownloadCompleted =
+            snapshot => nativeCallbackCompletion.TrySetResult(snapshot);
+
+        try
+        {
+            references.Add(await CreateAndDisposeMacOsWebViewAsync(
+                    pages.DelayedDownloadUri,
+                    nativeDispatchCompletion.Task,
+                    cancellationToken)
+                .ConfigureAwait(true));
+
+            if (retainedCompletionBlock == IntPtr.Zero)
+                throw new InvalidOperationException("macOS direct-download dispatch did not retain its completion block.");
+
+            var completionBlock = retainedCompletionBlock;
+            retainedCompletionBlock = IntPtr.Zero;
+            try
+            {
+                MacOSNativeWebViewHost.InvokeStartDownloadCompletionBlockForTests(completionBlock, IntPtr.Zero);
+            }
+            finally
+            {
+                MacOSNativeWebViewHost.ReleaseStartDownloadCompletionBlockForTests(completionBlock);
+            }
+
+            var completionSnapshot = await nativeCallbackCompletion.Task
+                .WaitAsync(TimeSpan.FromSeconds(20), cancellationToken)
+                .ConfigureAwait(true);
+            if (!completionSnapshot.HostDisposed || completionSnapshot.DelegateAttached)
+            {
+                throw new InvalidOperationException(
+                    $"macOS direct-download callback escaped disposal isolation: {completionSnapshot}.");
+            }
+        }
+        finally
+        {
+            if (retainedCompletionBlock != IntPtr.Zero)
+            {
+                MacOSNativeWebViewHost.ReleaseStartDownloadCompletionBlockForTests(retainedCompletionBlock);
+            }
+
+            MacOSNativeWebViewHostTestHooks.StartDownloadDispatch = null;
+            MacOSNativeWebViewHostTestHooks.StartDownloadCompleted = null;
+        }
+
+        for (var iteration = 1; iteration < 3; iteration++)
+        {
+            references.Add(await CreateAndDisposeMacOsWebViewAsync(
+                    null,
+                    null,
+                    cancellationToken)
+                .ConfigureAwait(true));
+        }
+
+        await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(true);
+        await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.ApplicationIdle);
+        for (var attempt = 0; attempt < 10 && references.Any(static reference => reference.IsAlive); attempt++)
+        {
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+
+        if (references.Any(static reference => reference.IsAlive))
+            throw new InvalidOperationException("A disposed macOS native host remained reachable after repeated collection.");
+    }
+
+    private async Task<WeakReference> CreateAndDisposeMacOsWebViewAsync(
+        Uri? delayedDownloadUri,
+        Task? nativeDownloadDispatch,
+        CancellationToken cancellationToken)
+    {
+        var webView = new NativeWebView.Controls.NativeWebView
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            RenderMode = NativeWebViewRenderMode.Offscreen,
+        };
+        Grid.SetRow(webView, 1);
+        _rootGrid.Children.Add(webView);
+
+        try
+        {
+            await Dispatcher.UIThread.InvokeAsync(static () => { }, DispatcherPriority.Loaded);
+            await webView.InitializeAsync(cancellationToken).ConfigureAwait(true);
+            _ = await webView.ExecuteScriptAsync("1", cancellationToken).ConfigureAwait(true);
+            if (delayedDownloadUri is not null)
+            {
+                if (nativeDownloadDispatch is null)
+                    throw new InvalidOperationException("A direct-download dispatch signal is required for this lifecycle check.");
+
+                var downloadUriLiteral = JsonSerializer.Serialize(delayedDownloadUri.AbsoluteUri);
+                _ = await webView.ExecuteScriptAsync(
+                        $"globalThis.webkit.messageHandlers.nativeWebViewDownload.postMessage('download\\n' + {downloadUriLiteral}); true",
+                        cancellationToken)
+                    .ConfigureAwait(true);
+                await nativeDownloadDispatch
+                    .WaitAsync(TimeSpan.FromSeconds(20), cancellationToken)
+                    .ConfigureAwait(true);
+            }
+        }
+        finally
+        {
+            _rootGrid.Children.Remove(webView);
+            webView.Dispose();
+        }
+
+        return new WeakReference(webView);
+    }
+
+    private static async Task AssertCanceledAsync(Func<Task<string?>> action)
+    {
+        try
+        {
+            _ = await action().ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException("Expected script execution cancellation.");
     }
 
     private async Task<IntegrationScenarioResult> RunDialogScenarioAsync(

@@ -7,3 +7,4 @@ using System.Runtime.CompilerServices;
 [assembly: InternalsVisibleTo("NativeWebView.Platform.Android")]
 [assembly: InternalsVisibleTo("NativeWebView.Platform.Browser")]
 [assembly: InternalsVisibleTo("NativeWebView.Core.Tests")]
+[assembly: InternalsVisibleTo("NativeWebView")]

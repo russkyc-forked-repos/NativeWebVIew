@@ -3,15 +3,103 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Avalonia.Platform;
 using Avalonia.Threading;
 using NativeWebView.Core;
 
 namespace NativeWebView.Controls;
 
+internal readonly record struct MacOSScriptEvaluationSetupRollbackSnapshot(
+    bool PendingEntryRemoved,
+    bool ManagedCleanupCompleted,
+    bool CreatorBlockReleased,
+    bool ManagedOwnershipReleased,
+    int NativeOwnershipCount,
+    bool ManagedHandleReleased);
+
+internal readonly record struct MacOSStartDownloadCompletionSnapshot(
+    bool HostDisposed,
+    bool ContextAbandoned,
+    bool DelegateAttached);
+
+internal static class MacOSNativeWebViewHostTestHooks
+{
+    internal static Func<CancellationToken, Action<object?>, object?, CancellationTokenRegistration>?
+        CancellationRegistrationFactory { get; set; }
+
+    internal static Action<MacOSScriptEvaluationSetupRollbackSnapshot>? ScriptEvaluationSetupRolledBack { get; set; }
+
+    internal static Action<IntPtr, IntPtr, IntPtr>? StartDownloadDispatch { get; set; }
+
+    internal static Action<MacOSStartDownloadCompletionSnapshot>? StartDownloadCompleted { get; set; }
+
+    internal static CancellationTokenRegistration RegisterCancellation(
+        CancellationToken cancellationToken,
+        Action<object?> callback,
+        object? state)
+    {
+        var factory = CancellationRegistrationFactory;
+        return factory is null
+            ? cancellationToken.Register(callback, state)
+            : factory(cancellationToken, callback, state);
+    }
+
+    internal static bool TryDispatchStartDownload(IntPtr view, IntPtr request, IntPtr block)
+    {
+        var dispatch = StartDownloadDispatch;
+        if (dispatch is null)
+            return false;
+
+        dispatch(view, request, block);
+        return true;
+    }
+
+    internal static void NotifyScriptEvaluationSetupRolledBack(
+        MacOSScriptEvaluationSetupRollbackSnapshot snapshot)
+    {
+        try
+        {
+            ScriptEvaluationSetupRolledBack?.Invoke(snapshot);
+        }
+        catch
+        {
+            // Test observation must not change production exception behavior.
+        }
+    }
+
+    internal static void NotifyStartDownloadCompleted(MacOSStartDownloadCompletionSnapshot snapshot)
+    {
+        try
+        {
+            StartDownloadCompleted?.Invoke(snapshot);
+        }
+        catch
+        {
+            // Test observation must not cross the Objective-C completion boundary.
+        }
+    }
+
+    internal static void Reset()
+    {
+        CancellationRegistrationFactory = null;
+        ScriptEvaluationSetupRolledBack = null;
+        StartDownloadDispatch = null;
+        StartDownloadCompleted = null;
+    }
+}
+
 internal sealed class MacOSNativeWebViewHost : IDisposable
 {
     private const string DownloadTracePrefix = "NativeWebView.macOS.download";
+    private const string NativeTracePrefix = "NativeWebView.macOS.native";
+    internal const string ConstructionCleanupExceptionsDataKey = "NativeWebView.macOS.ConstructionCleanupExceptions";
+    internal const string ScriptEvaluationSetupCleanupExceptionsDataKey =
+        "NativeWebView.macOS.ScriptEvaluationSetupCleanupExceptions";
+    internal const string StartDownloadSetupCleanupExceptionDataKey =
+        "NativeWebView.macOS.StartDownloadSetupCleanupException";
+    internal const string ManagedOwnerHandleRetainedMessage =
+        "The macOS native web-view managed owner handle was retained because native callback ownership could not be released safely.";
     private const double CompositedOverlayAlpha = 0.011;
     private const int MaxPendingNavigationAttempts = 80;
     private const int DownloadBufferSize = 81920;
@@ -21,6 +109,8 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private const ulong NSEventModifierFlagCommand = 1UL << 20;
     private const nuint NSViewWidthSizable = 1u << 1;
     private const nuint NSViewHeightSizable = 1u << 4;
+    private const nuint NSJsonWritingFragmentsAllowed = 1u << 2;
+    private const nuint NSUtf8StringEncoding = 4;
     private static readonly TimeSpan PendingNavigationRetryInterval = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan AcceptedNavigationStartTimeout = TimeSpan.FromMilliseconds(750);
     private static readonly HttpClient DownloadHttpClient = new();
@@ -37,6 +127,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static readonly IntPtr NSURLClass = ObjC.GetClass("NSURL");
         public static readonly IntPtr NSURLRequestClass = ObjC.GetClass("NSURLRequest");
         public static readonly IntPtr NSApplicationClass = ObjC.GetClass("NSApplication");
+        public static readonly IntPtr NSJsonSerializationClass = ObjC.GetClass("NSJSONSerialization");
         public static readonly IntPtr WKUserContentControllerClass = ObjC.GetClass("WKUserContentController");
         public static readonly IntPtr WKUserScriptClass = ObjC.GetClass("WKUserScript");
         public static readonly IntPtr WKWebViewClass = ObjC.GetClass("WKWebView");
@@ -58,6 +149,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static readonly IntPtr SelBounds = ObjC.GetSelector("bounds");
         public static readonly IntPtr SelStringWithUtf8String = ObjC.GetSelector("stringWithUTF8String:");
         public static readonly IntPtr SelUtf8String = ObjC.GetSelector("UTF8String");
+        public static readonly IntPtr SelIsKindOfClass = ObjC.GetSelector("isKindOfClass:");
         public static readonly IntPtr SelUrlWithString = ObjC.GetSelector("URLWithString:");
         public static readonly IntPtr SelFileUrlWithPath = ObjC.GetSelector("fileURLWithPath:");
         public static readonly IntPtr SelRequestWithUrl = ObjC.GetSelector("requestWithURL:");
@@ -69,6 +161,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static readonly IntPtr SelAddScriptMessageHandlerName = ObjC.GetSelector("addScriptMessageHandler:name:");
         public static readonly IntPtr SelRemoveScriptMessageHandlerForName = ObjC.GetSelector("removeScriptMessageHandlerForName:");
         public static readonly IntPtr SelInitWithSourceInjectionTimeForMainFrameOnly = ObjC.GetSelector("initWithSource:injectionTime:forMainFrameOnly:");
+        public static readonly IntPtr SelEvaluateJavaScriptCompletionHandler = ObjC.GetSelector("evaluateJavaScript:completionHandler:");
+        public static readonly IntPtr SelName = ObjC.GetSelector("name");
+        public static readonly IntPtr SelDataWithJsonObjectOptionsError = ObjC.GetSelector("dataWithJSONObject:options:error:");
+        public static readonly IntPtr SelInitWithDataEncoding = ObjC.GetSelector("initWithData:encoding:");
+        public static readonly IntPtr SelDescription = ObjC.GetSelector("description");
         public static readonly IntPtr SelStartDownloadUsingRequestCompletionHandler = ObjC.GetSelector("startDownloadUsingRequest:completionHandler:");
         public static readonly IntPtr SelResumeDownloadFromResumeDataCompletionHandler = ObjC.GetSelector("resumeDownloadFromResumeData:completionHandler:");
         public static readonly IntPtr SelInitWithFrameConfiguration = ObjC.GetSelector("initWithFrame:configuration:");
@@ -158,13 +255,15 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private Uri? _lastNavigationUri;
     private Uri? _contextMenuDownloadUri;
     private readonly HashSet<string> _forcedDownloadUris = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<IntPtr> _pendingStartDownloadBlocks = [];
+    private readonly Dictionary<IntPtr, StartDownloadBlockContext> _pendingStartDownloadBlocks = [];
+    private readonly Dictionary<IntPtr, ScriptEvaluationContext> _pendingScriptEvaluationBlocks = [];
     private readonly Dictionary<IntPtr, (string CommandId, NativeWebViewContextMenuTarget Target)> _contextMenuCommands = [];
     private long _captureFrameSequence;
     private GCHandle _managedHandle;
     private IntPtr _navigationDelegateHandle;
     private IntPtr _userContentControllerHandle;
     private IntPtr _downloadBridgeNameHandle;
+    private IntPtr _webMessageBridgeNameHandle;
     private bool _contextMenuTargetEditable;
     private string? _activeContextMenuTargetToken;
 
@@ -188,33 +287,42 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         _instanceConfiguration = instanceConfiguration?.Clone() ?? new NativeWebViewInstanceConfiguration();
         _downloadManager = downloadManager;
         TraceDownload("host.create", $"downloadManager={downloadManager is not null}");
-        _managedHandle = GCHandle.Alloc(this);
-        var initialFrame = ObjC.SendCGRect(parent.Handle, NativeSymbols.SelBounds);
-
-        ConfigurationHandle = ObjC.SendIntPtr(ObjC.SendIntPtr(NativeSymbols.WKWebViewConfigurationClass, NativeSymbols.SelAlloc), NativeSymbols.SelInit);
-        ApplyProxyConfiguration();
-        InstallDownloadScriptBridge();
-        ViewHandle = ObjC.SendIntPtrCGRectIntPtr(
-            ObjC.SendIntPtr(MacOSKeyEquivalentWebView.ClassHandle, NativeSymbols.SelAlloc),
-            NativeSymbols.SelInitWithFrameConfiguration,
-            initialFrame,
-            ConfigurationHandle);
-
-        if (ViewHandle == IntPtr.Zero)
+        try
         {
-            TraceDownload("host.create.failed", "WKWebView handle was zero");
-            throw new InvalidOperationException("Failed to create WKWebView native view.");
-        }
+            _managedHandle = GCHandle.Alloc(this);
+            var initialFrame = ObjC.SendCGRect(parent.Handle, NativeSymbols.SelBounds);
 
-        TraceDownload("host.create.ready", $"view=0x{ViewHandle.ToInt64():X}");
-        MacOSKeyEquivalentWebView.SetOwner(ViewHandle, _managedHandle);
-        ObjC.SendVoidIntPtr(parent.Handle, NativeSymbols.SelAddSubview, ViewHandle);
-        InstallWebViewDelegates();
-        ObjC.SendVoidCGRect(ViewHandle, NativeSymbols.SelSetFrame, initialFrame);
-        ObjC.SendVoidDouble(ViewHandle, NativeSymbols.SelSetAlphaValue, 1d);
-        ObjC.SendVoidNUInt(ViewHandle, NativeSymbols.SelSetAutoresizingMask, NSViewWidthSizable | NSViewHeightSizable);
-        PlatformHandle = new PlatformHandle(ViewHandle, "NSView");
-        RequestLayoutForCurrentMode();
+            ConfigurationHandle = ObjC.SendIntPtr(ObjC.SendIntPtr(NativeSymbols.WKWebViewConfigurationClass, NativeSymbols.SelAlloc), NativeSymbols.SelInit);
+            ApplyProxyConfiguration();
+            InstallUserContentScripts();
+            ViewHandle = ObjC.SendIntPtrCGRectIntPtr(
+                ObjC.SendIntPtr(MacOSKeyEquivalentWebView.ClassHandle, NativeSymbols.SelAlloc),
+                NativeSymbols.SelInitWithFrameConfiguration,
+                initialFrame,
+                ConfigurationHandle);
+
+            if (ViewHandle == IntPtr.Zero)
+            {
+                TraceDownload("host.create.failed", "WKWebView handle was zero");
+                throw new InvalidOperationException("Failed to create WKWebView native view.");
+            }
+
+            TraceDownload("host.create.ready", $"view=0x{ViewHandle.ToInt64():X}");
+            MacOSKeyEquivalentWebView.SetOwner(ViewHandle, _managedHandle);
+            ObjC.SendVoidIntPtr(parent.Handle, NativeSymbols.SelAddSubview, ViewHandle);
+            InstallWebViewDelegates();
+            ObjC.SendVoidCGRect(ViewHandle, NativeSymbols.SelSetFrame, initialFrame);
+            ObjC.SendVoidDouble(ViewHandle, NativeSymbols.SelSetAlphaValue, 1d);
+            ObjC.SendVoidNUInt(ViewHandle, NativeSymbols.SelSetAutoresizingMask, NSViewWidthSizable | NSViewHeightSizable);
+            PlatformHandle = new PlatformHandle(ViewHandle, "NSView");
+            RequestLayoutForCurrentMode();
+        }
+        catch (Exception exception)
+        {
+            _disposed = true;
+            RollbackFailedConstruction(exception);
+            throw;
+        }
     }
 
     public IPlatformHandle PlatformHandle { get; }
@@ -234,6 +342,8 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested;
 
     public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
+
+    public event EventHandler<NativeWebViewMessageReceivedEventArgs>? WebMessageReceived;
 
     public event EventHandler? NativeFocusRequested;
 
@@ -653,73 +763,176 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         }
 
         _disposed = true;
-
-        var downloadContexts = _downloads.Values.ToArray();
-        _downloads.Clear();
-        foreach (var context in downloadContexts)
+        try
         {
-            context.CancelForHostDispose();
-            context.Dispose();
-        }
+            var cleanupResult = CreateCleanupCoordinator().Rollback();
+            foreach (var exception in cleanupResult.Exceptions)
+                TraceNativeFailure("host.dispose.cleanup", exception);
 
-        var managedDownloadContexts = _managedDownloads.ToArray();
-        _managedDownloads.Clear();
-        foreach (var context in managedDownloadContexts)
-        {
-            context.CancelForHostDispose();
-            context.Dispose();
-        }
-
-        foreach (var block in _pendingStartDownloadBlocks.ToArray())
-        {
-            _pendingStartDownloadBlocks.Remove(block);
-            MacOSWebKitDownloadDelegate.ReleaseStartDownloadBlock(block);
-        }
-
-        if (ViewHandle != IntPtr.Zero)
-        {
-            ObjC.SendVoidIntPtr(ViewHandle, NativeSymbols.SelSetNavigationDelegate, IntPtr.Zero);
-            ObjC.SendVoidIntPtr(ViewHandle, NativeSymbols.SelSetUiDelegate, IntPtr.Zero);
-            ObjC.SendVoid(ViewHandle, NativeSymbols.SelStopLoading);
-            ObjC.SendVoid(ViewHandle, NativeSymbols.SelRemoveFromSuperview);
-            ObjC.SendVoid(ViewHandle, NativeSymbols.SelRelease);
-            ViewHandle = IntPtr.Zero;
-        }
-
-        if (_userContentControllerHandle != IntPtr.Zero)
-        {
-            if (_downloadBridgeNameHandle != IntPtr.Zero &&
-                ObjC.SendBoolIntPtr(_userContentControllerHandle, NativeSymbols.SelRespondsToSelector, NativeSymbols.SelRemoveScriptMessageHandlerForName))
+            if (cleanupResult.ManagedOwnerHandleRetained)
             {
-                ObjC.SendVoidIntPtr(_userContentControllerHandle, NativeSymbols.SelRemoveScriptMessageHandlerForName, _downloadBridgeNameHandle);
+                TraceNativeFailure(
+                    "host.dispose.managed-owner-retained",
+                    new InvalidOperationException(ManagedOwnerHandleRetainedMessage));
             }
-
-            ObjC.SendVoid(_userContentControllerHandle, NativeSymbols.SelRelease);
-            _userContentControllerHandle = IntPtr.Zero;
         }
-
-        if (_downloadBridgeNameHandle != IntPtr.Zero)
+        catch (Exception exception)
         {
-            ObjC.SendVoid(_downloadBridgeNameHandle, NativeSymbols.SelRelease);
-            _downloadBridgeNameHandle = IntPtr.Zero;
+            TraceNativeFailure("host.dispose.setup", exception);
+        }
+    }
+
+    private void RollbackFailedConstruction(Exception primaryException)
+    {
+        try
+        {
+            AttachConstructionCleanupFailures(primaryException, CreateCleanupCoordinator().Rollback());
+        }
+        catch (Exception cleanupException)
+        {
+            try
+            {
+                AttachConstructionCleanupFailures(
+                    primaryException,
+                    new NativeResourceCleanupResult([cleanupException], ManagedOwnerHandleRetained: true));
+            }
+            catch (Exception attachException)
+            {
+                TraceNativeFailure("host.create.cleanup-attachment", attachException);
+            }
+        }
+    }
+
+    private NativeResourceCleanupCoordinator CreateCleanupCoordinator()
+    {
+        var cleanup = new NativeResourceCleanupCoordinator();
+        var managedHandle = _managedHandle;
+        var configurationHandle = ConfigurationHandle;
+        var navigationDelegateHandle = _navigationDelegateHandle;
+        var downloadBridgeNameHandle = _downloadBridgeNameHandle;
+        var webMessageBridgeNameHandle = _webMessageBridgeNameHandle;
+        var userContentControllerHandle = _userContentControllerHandle;
+        var viewHandle = ViewHandle;
+        var scriptEvaluations = _pendingScriptEvaluationBlocks.Values.ToArray();
+        var startDownloadContexts = _pendingStartDownloadBlocks.Values.ToArray();
+        var managedDownloads = _managedDownloads.ToArray();
+        var downloads = _downloads.Values.ToArray();
+
+        _managedHandle = default;
+        ConfigurationHandle = IntPtr.Zero;
+        _navigationDelegateHandle = IntPtr.Zero;
+        _downloadBridgeNameHandle = IntPtr.Zero;
+        _webMessageBridgeNameHandle = IntPtr.Zero;
+        _userContentControllerHandle = IntPtr.Zero;
+        ViewHandle = IntPtr.Zero;
+        _pendingScriptEvaluationBlocks.Clear();
+        _pendingStartDownloadBlocks.Clear();
+        _managedDownloads.Clear();
+        _downloads.Clear();
+
+        cleanup.RegisterManagedOwnerRelease(() =>
+        {
+            if (managedHandle.IsAllocated)
+                managedHandle.Free();
+        });
+        if (configurationHandle != IntPtr.Zero)
+        {
+            cleanup.Register(
+                () => ObjC.SendVoid(configurationHandle, NativeSymbols.SelRelease),
+                NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
+        }
+        if (navigationDelegateHandle != IntPtr.Zero)
+        {
+            cleanup.Register(
+                () => ObjC.SendVoid(navigationDelegateHandle, NativeSymbols.SelRelease),
+                NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
+        }
+        if (downloadBridgeNameHandle != IntPtr.Zero)
+            cleanup.Register(() => ObjC.SendVoid(downloadBridgeNameHandle, NativeSymbols.SelRelease));
+        if (webMessageBridgeNameHandle != IntPtr.Zero)
+            cleanup.Register(() => ObjC.SendVoid(webMessageBridgeNameHandle, NativeSymbols.SelRelease));
+        if (userContentControllerHandle != IntPtr.Zero)
+        {
+            cleanup.Register(
+                () => ObjC.SendVoid(userContentControllerHandle, NativeSymbols.SelRelease),
+                NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
+            if (webMessageBridgeNameHandle != IntPtr.Zero)
+            {
+                cleanup.Register(
+                    () => RemoveScriptMessageHandler(userContentControllerHandle, webMessageBridgeNameHandle),
+                    NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
+            }
+            if (downloadBridgeNameHandle != IntPtr.Zero)
+            {
+                cleanup.Register(
+                    () => RemoveScriptMessageHandler(userContentControllerHandle, downloadBridgeNameHandle),
+                    NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
+            }
+        }
+        foreach (var context in scriptEvaluations)
+        {
+            cleanup.Register(() => ReleaseManagedScriptEvaluationContext(context));
+            cleanup.Register(() => context.Completion.TrySetException(
+                new ObjectDisposedException(nameof(MacOSNativeWebViewHost))));
+        }
+        if (viewHandle != IntPtr.Zero)
+        {
+            cleanup.Register(
+                () => ObjC.SendVoid(viewHandle, NativeSymbols.SelRelease),
+                NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
+            cleanup.Register(
+                () => ObjC.SendVoid(viewHandle, NativeSymbols.SelRemoveFromSuperview),
+                NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
+            cleanup.Register(() => ObjC.SendVoid(viewHandle, NativeSymbols.SelStopLoading));
+            cleanup.Register(
+                () => ObjC.SendVoidIntPtr(viewHandle, NativeSymbols.SelSetUiDelegate, IntPtr.Zero),
+                NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
+            cleanup.Register(
+                () => ObjC.SendVoidIntPtr(viewHandle, NativeSymbols.SelSetNavigationDelegate, IntPtr.Zero),
+                NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
+        }
+        foreach (var context in startDownloadContexts)
+        {
+            cleanup.Register(() => ReleaseManagedStartDownloadContext(context));
+        }
+        foreach (var context in managedDownloads)
+        {
+            cleanup.Register(context.Dispose);
+            cleanup.Register(context.CancelForHostDispose);
+        }
+        foreach (var context in downloads)
+        {
+            cleanup.Register(
+                context.Dispose,
+                NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
+            cleanup.Register(
+                context.CancelForHostDispose,
+                NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable);
         }
 
-        if (_navigationDelegateHandle != IntPtr.Zero)
+        return cleanup;
+    }
+
+    private static void RemoveScriptMessageHandler(IntPtr controller, IntPtr name)
+    {
+        if (ObjC.SendBoolIntPtr(controller, NativeSymbols.SelRespondsToSelector, NativeSymbols.SelRemoveScriptMessageHandlerForName))
+            ObjC.SendVoidIntPtr(controller, NativeSymbols.SelRemoveScriptMessageHandlerForName, name);
+    }
+
+    internal static void AttachConstructionCleanupFailures(
+        Exception primaryException,
+        NativeResourceCleanupResult cleanupResult)
+    {
+        List<Exception>? diagnostics = cleanupResult.Exceptions.Count == 0
+            ? null
+            : [.. cleanupResult.Exceptions];
+        if (cleanupResult.ManagedOwnerHandleRetained)
         {
-            ObjC.SendVoid(_navigationDelegateHandle, NativeSymbols.SelRelease);
-            _navigationDelegateHandle = IntPtr.Zero;
+            (diagnostics ??= []).Add(new InvalidOperationException(ManagedOwnerHandleRetainedMessage));
         }
 
-        if (ConfigurationHandle != IntPtr.Zero)
-        {
-            ObjC.SendVoid(ConfigurationHandle, NativeSymbols.SelRelease);
-            ConfigurationHandle = IntPtr.Zero;
-        }
-
-        if (_managedHandle.IsAllocated)
-        {
-            _managedHandle.Free();
-        }
+        if (diagnostics is not null)
+            primaryException.Data[ConstructionCleanupExceptionsDataKey] = new AggregateException(diagnostics);
     }
 
     private void RestoreEmbeddedFrame()
@@ -748,52 +961,462 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         TraceDownload("delegate.installed", $"delegate=0x{_navigationDelegateHandle.ToInt64():X}");
     }
 
-    private void InstallDownloadScriptBridge()
+    private void InstallUserContentScripts()
     {
-        if (_downloadManager is null || ConfigurationHandle == IntPtr.Zero)
-        {
-            TraceDownload("bridge.skip", $"downloadManager={_downloadManager is not null}, configuration=0x{ConfigurationHandle.ToInt64():X}");
-            return;
-        }
+        if (ConfigurationHandle == IntPtr.Zero)
+            throw new InvalidOperationException("WKWebView configuration is unavailable for document-start script registration.");
 
         EnsureDownloadDelegate();
-        _downloadBridgeNameHandle = CreateNSString("nativeWebViewDownload");
-        if (_downloadBridgeNameHandle != IntPtr.Zero)
-            _downloadBridgeNameHandle = ObjC.SendIntPtr(_downloadBridgeNameHandle, NativeSymbols.SelRetain);
-
         _userContentControllerHandle = ObjC.SendIntPtr(ObjC.SendIntPtr(NativeSymbols.WKUserContentControllerClass, NativeSymbols.SelAlloc), NativeSymbols.SelInit);
-        if (_downloadBridgeNameHandle == IntPtr.Zero || _userContentControllerHandle == IntPtr.Zero)
-        {
-            TraceDownload("bridge.failed", $"name=0x{_downloadBridgeNameHandle.ToInt64():X}, controller=0x{_userContentControllerHandle.ToInt64():X}");
-            return;
-        }
+        if (_userContentControllerHandle == IntPtr.Zero)
+            throw new InvalidOperationException("WKWebView did not create a user content controller.");
 
+        _webMessageBridgeNameHandle = RetainNSString("nativeWebViewMessage");
+        if (_webMessageBridgeNameHandle == IntPtr.Zero)
+            throw new InvalidOperationException("WKWebView did not create the web-message bridge name.");
         ObjC.SendVoidIntPtrIntPtr(
             _userContentControllerHandle,
             NativeSymbols.SelAddScriptMessageHandlerName,
             _navigationDelegateHandle,
-            _downloadBridgeNameHandle);
+            _webMessageBridgeNameHandle);
+        AddUserScript(
+            "globalThis.chrome ??= {}; globalThis.chrome.webview ??= {}; globalThis.chrome.webview.postMessage = value => { const kind = typeof value === 'string' ? 'string' : 'json'; const payload = kind === 'string' ? value : (JSON.stringify(value) ?? 'null'); globalThis.webkit.messageHandlers.nativeWebViewMessage.postMessage(JSON.stringify({ nativeWebViewVersion: 1, kind, payload })); };",
+            mainFrameOnly: false);
 
-        var sourceHandle = CreateNSString(CreateDownloadBridgeScript());
+        if (_downloadManager is not null)
+        {
+            _downloadBridgeNameHandle = RetainNSString("nativeWebViewDownload");
+            if (_downloadBridgeNameHandle == IntPtr.Zero)
+                throw new InvalidOperationException("WKWebView did not create the download bridge name.");
+            ObjC.SendVoidIntPtrIntPtr(
+                _userContentControllerHandle,
+                NativeSymbols.SelAddScriptMessageHandlerName,
+                _navigationDelegateHandle,
+                _downloadBridgeNameHandle);
+            AddUserScript(CreateDownloadBridgeScript(), mainFrameOnly: false);
+        }
+
+        foreach (var documentStartScript in _instanceConfiguration.DocumentStartScripts)
+            AddUserScript(documentStartScript.Source, documentStartScript.FrameScope == NativeWebViewScriptFrameScope.MainFrame);
+
+        ObjC.SendVoidIntPtr(ConfigurationHandle, NativeSymbols.SelSetUserContentController, _userContentControllerHandle);
+    }
+
+    private static IntPtr RetainNSString(string value)
+    {
+        var handle = CreateNSString(value);
+        return handle == IntPtr.Zero ? IntPtr.Zero : ObjC.SendIntPtr(handle, NativeSymbols.SelRetain);
+    }
+
+    private void AddUserScript(string source, bool mainFrameOnly)
+    {
+        var sourceHandle = CreateNSString(source);
+        if (sourceHandle == IntPtr.Zero)
+            throw new InvalidOperationException("WKWebView did not create a requested document-start script source.");
         var userScript = ObjC.SendIntPtrIntPtrNIntBool(
             ObjC.SendIntPtr(NativeSymbols.WKUserScriptClass, NativeSymbols.SelAlloc),
             NativeSymbols.SelInitWithSourceInjectionTimeForMainFrameOnly,
             sourceHandle,
             0,
-            false);
+            mainFrameOnly);
+        if (userScript == IntPtr.Zero)
+            throw new InvalidOperationException("WKWebView did not register a requested document-start script.");
+        ObjC.SendVoidIntPtr(_userContentControllerHandle, NativeSymbols.SelAddUserScript, userScript);
+        ObjC.SendVoid(userScript, NativeSymbols.SelRelease);
+    }
 
-        if (userScript != IntPtr.Zero)
+    public async Task<string?> ExecuteScriptAsync(string script, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(script);
+        cancellationToken.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (Dispatcher.UIThread.CheckAccess())
+            return await ExecuteScriptOnUiThreadAsync(script, cancellationToken).ConfigureAwait(false);
+
+        return await Dispatcher.UIThread
+            .InvokeAsync(() => ExecuteScriptOnUiThreadAsync(script, cancellationToken))
+            .ConfigureAwait(false);
+    }
+
+    private void RouteScriptMessageFromNative(string? name, ScriptMessageBody body)
+    {
+        DispatchScriptMessage(
+            action => Dispatcher.UIThread.Post(action, DispatcherPriority.Normal),
+            () => _disposed,
+            ApplyContextMenuBridgeState,
+            HandleScriptMessage,
+            name,
+            body);
+    }
+
+    internal static void DispatchScriptMessage(
+        Action<Action> post,
+        Func<bool> isDisposed,
+        Action<DownloadBridgeMessage> applyContextMenuState,
+        Action<string?, ScriptMessageBody> deliverDeferred,
+        string? name,
+        ScriptMessageBody body)
+    {
+        ArgumentNullException.ThrowIfNull(post);
+        ArgumentNullException.ThrowIfNull(isDisposed);
+        ArgumentNullException.ThrowIfNull(applyContextMenuState);
+        ArgumentNullException.ThrowIfNull(deliverDeferred);
+
+        if (isDisposed())
+            return;
+
+        switch (ClassifyScriptMessageDelivery(name, body.Payload))
         {
-            ObjC.SendVoidIntPtr(_userContentControllerHandle, NativeSymbols.SelAddUserScript, userScript);
-            ObjC.SendVoid(userScript, NativeSymbols.SelRelease);
+            case ScriptMessageDeliveryMode.ImmediateContextState:
+                applyContextMenuState(ParseDownloadBridgeMessage(body.Payload));
+                break;
+            case ScriptMessageDeliveryMode.Deferred:
+                post(() =>
+                {
+                    if (!isDisposed())
+                        deliverDeferred(name, body);
+                });
+                break;
         }
-        else
+    }
+
+    internal static ScriptMessageDeliveryMode ClassifyScriptMessageDelivery(string? name, string? payload)
+    {
+        switch (ClassifyScriptMessageRoute(name))
         {
-            TraceDownload("bridge.script.failed", "WKUserScript handle was zero");
+            case ScriptMessageRoute.Download:
+                var message = ParseDownloadBridgeMessage(payload);
+                return message.Kind is DownloadBridgeMessageKind.Credential or DownloadBridgeMessageKind.Context
+                    ? ScriptMessageDeliveryMode.ImmediateContextState
+                    : ScriptMessageDeliveryMode.Deferred;
+            case ScriptMessageRoute.WebMessage:
+                return ScriptMessageDeliveryMode.Deferred;
+            default:
+                return ScriptMessageDeliveryMode.None;
+        }
+    }
+
+    private void HandleScriptMessage(string? name, ScriptMessageBody body)
+    {
+        switch (ClassifyScriptMessageRoute(name))
+        {
+            case ScriptMessageRoute.Download:
+                HandleDownloadBridgeMessage(body.Payload);
+                break;
+            case ScriptMessageRoute.WebMessage:
+                var message = ParseWebMessageBridgeMessage(body);
+                WebMessageReceived?.Invoke(
+                    this,
+                    message.Kind == WebMessageBridgeMessageKind.Json
+                        ? new NativeWebViewMessageReceivedEventArgs(message: null, json: message.Payload)
+                        : new NativeWebViewMessageReceivedEventArgs(message.Payload, json: null));
+                break;
+        }
+    }
+
+    internal static ScriptMessageRoute ClassifyScriptMessageRoute(string? name) => name switch
+    {
+        "nativeWebViewDownload" => ScriptMessageRoute.Download,
+        "nativeWebViewMessage" => ScriptMessageRoute.WebMessage,
+        _ => ScriptMessageRoute.None,
+    };
+
+    internal static WebMessageBridgeMessage ParseWebMessageBridgeMessage(ScriptMessageBody body)
+    {
+        if (body.Kind != ScriptMessageBodyKind.NativeString)
+            return new WebMessageBridgeMessage(WebMessageBridgeMessageKind.String, body.Payload);
+
+        return ParseWebMessageBridgeMessage(body.Payload);
+    }
+
+    internal static WebMessageBridgeMessage ParseWebMessageBridgeMessage(string? value)
+    {
+        if (value is null)
+            return new WebMessageBridgeMessage(WebMessageBridgeMessageKind.String, Payload: null);
+
+        try
+        {
+            using var document = JsonDocument.Parse(value);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("nativeWebViewVersion", out var version) ||
+                version.ValueKind != JsonValueKind.Number ||
+                !version.TryGetInt32(out var versionValue) ||
+                versionValue != 1 ||
+                !root.TryGetProperty("kind", out var kind) ||
+                kind.ValueKind != JsonValueKind.String ||
+                !root.TryGetProperty("payload", out var payload) ||
+                payload.ValueKind != JsonValueKind.String)
+            {
+                return new WebMessageBridgeMessage(WebMessageBridgeMessageKind.String, value);
+            }
+
+            var payloadValue = payload.GetString();
+            if (string.Equals(kind.GetString(), "string", StringComparison.Ordinal))
+                return new WebMessageBridgeMessage(WebMessageBridgeMessageKind.String, payloadValue);
+
+            if (!string.Equals(kind.GetString(), "json", StringComparison.Ordinal) || payloadValue is null)
+                return new WebMessageBridgeMessage(WebMessageBridgeMessageKind.String, value);
+
+            using var _ = JsonDocument.Parse(payloadValue);
+            return new WebMessageBridgeMessage(WebMessageBridgeMessageKind.Json, payloadValue);
+        }
+        catch (JsonException)
+        {
+            return new WebMessageBridgeMessage(WebMessageBridgeMessageKind.String, value);
+        }
+        catch (InvalidOperationException)
+        {
+            return new WebMessageBridgeMessage(WebMessageBridgeMessageKind.String, value);
+        }
+    }
+
+    private Task<string?> ExecuteScriptOnUiThreadAsync(string script, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        var context = new ScriptEvaluationContext(this, cancellationToken);
+        try
+        {
+            context.ManagedHandle = GCHandle.Alloc(context);
+            var block = MacOSWebKitDownloadDelegate.CreateScriptEvaluationBlock(context.ManagedHandle);
+            if (block == IntPtr.Zero)
+                throw new InvalidOperationException("WKWebView did not create a JavaScript evaluation completion block.");
+
+            context.Block = block;
+            context.CreatorBlockOwned = 1;
+            _pendingScriptEvaluationBlocks.Add(block, context);
+            context.CancellationRegistration = MacOSNativeWebViewHostTestHooks.RegisterCancellation(
+                cancellationToken,
+                static state =>
+                {
+                    var evaluation = (ScriptEvaluationContext)state!;
+                    evaluation.DispatchState.TryCancelBeforeDispatch();
+                    evaluation.Completion.TrySetCanceled(evaluation.CancellationToken);
+                },
+                context);
+
+            var source = CreateNSString(script);
+            if (source == IntPtr.Zero)
+                throw new InvalidOperationException("WKWebView did not create the JavaScript evaluation source.");
+
+            if (!context.DispatchState.TryMarkDispatched())
+            {
+                _pendingScriptEvaluationBlocks.Remove(block);
+                ReleaseManagedScriptEvaluationContext(context);
+                return context.Completion.Task;
+            }
+
+            ObjC.SendVoidIntPtrIntPtr(ViewHandle, NativeSymbols.SelEvaluateJavaScriptCompletionHandler, source, block);
+            // WebKit retains the asynchronous completion block. Drop the creator reference so
+            // the block dispose helper observes WebKit releasing a callback it never invokes.
+            context.ReleaseCreatorBlock();
+            return context.Completion.Task;
+        }
+        catch (Exception setupException)
+        {
+            if (context.Block != IntPtr.Zero)
+                _pendingScriptEvaluationBlocks.Remove(context.Block);
+            CleanupFailedScriptEvaluationSetup(
+                setupException,
+                () => ReleaseManagedScriptEvaluationContext(context));
+            MacOSNativeWebViewHostTestHooks.NotifyScriptEvaluationSetupRolledBack(
+                new MacOSScriptEvaluationSetupRollbackSnapshot(
+                    context.Block == IntPtr.Zero || !_pendingScriptEvaluationBlocks.ContainsKey(context.Block),
+                    Volatile.Read(ref context.ManagedCleanupState) != 0,
+                    Volatile.Read(ref context.CreatorBlockOwned) == 0,
+                    context.Ownership.IsManagedReleased,
+                    context.Ownership.NativeOwnershipCount,
+                    context.IsManagedHandleReleased));
+
+            throw;
+        }
+    }
+
+    internal static void CleanupFailedScriptEvaluationSetup(Exception primaryException, Action cleanup)
+    {
+        ArgumentNullException.ThrowIfNull(primaryException);
+        ArgumentNullException.ThrowIfNull(cleanup);
+        try
+        {
+            cleanup();
+        }
+        catch (Exception cleanupException)
+        {
+            primaryException.Data[ScriptEvaluationSetupCleanupExceptionsDataKey] = cleanupException;
+        }
+    }
+
+    private void ScriptEvaluationCompleted(IntPtr block, IntPtr result, IntPtr error)
+    {
+        if (!_pendingScriptEvaluationBlocks.Remove(block, out var context))
+            return;
+
+        try
+        {
+            if (error != IntPtr.Zero)
+            {
+                var message = ResolveErrorMessage(error) ?? "WKWebView JavaScript evaluation failed.";
+                context.Completion.TrySetException(new InvalidOperationException(message));
+            }
+            else
+            {
+                context.Completion.TrySetResult(ConvertScriptEvaluationResult(result));
+            }
+        }
+        catch (Exception ex)
+        {
+            context.Completion.TrySetException(ex);
+        }
+        finally
+        {
+            ReleaseManagedScriptEvaluationContext(context);
+        }
+    }
+
+    private void ScriptEvaluationNativeBlockDisposed(ScriptEvaluationContext context)
+    {
+        void CompleteWithoutCallback()
+        {
+            if (!_pendingScriptEvaluationBlocks.Remove(context.Block, out var pending) ||
+                !ReferenceEquals(pending, context))
+            {
+                return;
+            }
+
+            context.Completion.TrySetException(
+                new InvalidOperationException("WKWebView released a JavaScript evaluation without invoking its completion handler."));
+            try
+            {
+                ReleaseManagedScriptEvaluationContext(context);
+            }
+            catch (Exception cleanupException)
+            {
+                TraceNativeFailure("script-evaluation.native-dispose-cleanup", cleanupException);
+            }
         }
 
-        ObjC.SendVoidIntPtr(ConfigurationHandle, NativeSymbols.SelSetUserContentController, _userContentControllerHandle);
-        TraceDownload("bridge.installed", $"controller=0x{_userContentControllerHandle.ToInt64():X}, script={userScript != IntPtr.Zero}");
+        try
+        {
+            if (Dispatcher.UIThread.CheckAccess())
+                CompleteWithoutCallback();
+            else
+                Dispatcher.UIThread.Post(CompleteWithoutCallback);
+        }
+        catch (Exception dispatchException)
+        {
+            TraceNativeFailure("script-evaluation.native-dispose-dispatch", dispatchException);
+            context.Completion.TrySetException(
+                new InvalidOperationException(
+                    "WKWebView released a JavaScript evaluation without invoking its completion handler.",
+                    dispatchException));
+            try
+            {
+                ReleaseManagedScriptEvaluationContext(context);
+            }
+            catch (Exception cleanupException)
+            {
+                TraceNativeFailure("script-evaluation.native-dispose-cleanup", cleanupException);
+            }
+        }
+    }
+
+    private static void ReleaseManagedScriptEvaluationContext(ScriptEvaluationContext context)
+    {
+        if (Interlocked.Exchange(ref context.ManagedCleanupState, 1) != 0)
+            return;
+
+        List<Exception>? failures = null;
+        TryCleanup(context.CancellationRegistration.Dispose, ref failures);
+        TryCleanup(context.ReleaseCreatorBlock, ref failures);
+        TryCleanup(context.ReleaseManagedOwnership, ref failures);
+        if (failures is not null)
+            throw new AggregateException("JavaScript evaluation cleanup failed.", failures);
+    }
+
+    private static string ConvertScriptEvaluationResult(IntPtr result)
+    {
+        if (result == IntPtr.Zero)
+            return "null";
+
+        if (TrySerializeFoundationObjectToJson(result, out var json))
+            return json;
+
+        var description = ObjC.SendIntPtr(result, NativeSymbols.SelDescription);
+        return ObjC.StringFromNSString(description) ?? "null";
+    }
+
+    private static ScriptMessageBody ConvertScriptMessageBody(IntPtr body)
+    {
+        if (body == IntPtr.Zero)
+            return new ScriptMessageBody(ScriptMessageBodyKind.SerializedFoundationValue, Payload: null);
+
+        if (ObjC.SendBoolIntPtr(body, NativeSymbols.SelIsKindOfClass, NativeSymbols.NSStringClass))
+            return new ScriptMessageBody(
+                ScriptMessageBodyKind.NativeString,
+                ObjC.StringFromNSString(body));
+
+        if (TrySerializeFoundationObjectToJson(body, out var json))
+            return new ScriptMessageBody(ScriptMessageBodyKind.SerializedFoundationValue, json);
+
+        var description = ObjC.SendIntPtr(body, NativeSymbols.SelDescription);
+        return new ScriptMessageBody(
+            ScriptMessageBodyKind.SerializedFoundationValue,
+            ObjC.StringFromNSString(description));
+    }
+
+    private static bool TrySerializeFoundationObjectToJson(IntPtr value, out string json)
+    {
+        var errorStorage = Marshal.AllocHGlobal(IntPtr.Size);
+        try
+        {
+            Marshal.WriteIntPtr(errorStorage, IntPtr.Zero);
+            var jsonData = ObjC.SendIntPtrIntPtrNUIntIntPtr(
+                NativeSymbols.NSJsonSerializationClass,
+                NativeSymbols.SelDataWithJsonObjectOptionsError,
+                value,
+                NSJsonWritingFragmentsAllowed,
+                errorStorage);
+            if (jsonData == IntPtr.Zero)
+            {
+                json = string.Empty;
+                return false;
+            }
+
+            var jsonString = ObjC.SendIntPtrIntPtrNUInt(
+                ObjC.SendIntPtr(NativeSymbols.NSStringClass, NativeSymbols.SelAlloc),
+                NativeSymbols.SelInitWithDataEncoding,
+                jsonData,
+                NSUtf8StringEncoding);
+            if (jsonString == IntPtr.Zero)
+            {
+                json = string.Empty;
+                return false;
+            }
+
+            try
+            {
+                var converted = ObjC.StringFromNSString(jsonString);
+                if (converted is null)
+                {
+                    json = string.Empty;
+                    return false;
+                }
+
+                json = converted;
+                return true;
+            }
+            finally
+            {
+                ObjC.SendVoid(jsonString, NativeSymbols.SelRelease);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(errorStorage);
+        }
     }
 
     private void EnsureDownloadDelegate()
@@ -998,26 +1621,80 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
     private void HandleDownloadBridgeMessage(string? value)
     {
-        if (value?.StartsWith("credential\n", StringComparison.Ordinal) == true)
+        var message = ParseDownloadBridgeMessage(value);
+        if (message.Kind is DownloadBridgeMessageKind.Credential or DownloadBridgeMessageKind.Context)
         {
-            _contextMenuTargetEditable = string.Equals(value["credential\n".Length..], "1", StringComparison.Ordinal);
+            ApplyContextMenuBridgeState(message);
             return;
         }
+
+        StartForcedDownload(message.Payload);
+    }
+
+    private void ApplyContextMenuBridgeState(DownloadBridgeMessage message)
+    {
+        if (message.Kind == DownloadBridgeMessageKind.Credential)
+        {
+            _contextMenuTargetEditable = string.Equals(message.Payload, "1", StringComparison.Ordinal);
+            return;
+        }
+
+        if (message.Kind == DownloadBridgeMessageKind.Context)
+            UpdateContextMenuDownloadUri(message.Payload);
+    }
+
+    internal static DownloadBridgeMessage ParseDownloadBridgeMessage(string? value)
+    {
+        if (value?.StartsWith("credential\n", StringComparison.Ordinal) == true)
+            return new DownloadBridgeMessage(DownloadBridgeMessageKind.Credential, value["credential\n".Length..]);
 
         if (value?.StartsWith("context\n", StringComparison.Ordinal) == true)
-        {
-            UpdateContextMenuDownloadUri(value["context\n".Length..]);
-            return;
-        }
+            return new DownloadBridgeMessage(DownloadBridgeMessageKind.Context, value["context\n".Length..]);
 
         if (value?.StartsWith("download\n", StringComparison.Ordinal) == true)
-        {
-            StartForcedDownload(value["download\n".Length..]);
-            return;
-        }
+            return new DownloadBridgeMessage(DownloadBridgeMessageKind.Download, value["download\n".Length..]);
 
-        StartForcedDownload(value);
+        return new DownloadBridgeMessage(DownloadBridgeMessageKind.Download, value);
     }
+
+    internal enum DownloadBridgeMessageKind
+    {
+        Credential,
+        Context,
+        Download,
+    }
+
+    internal readonly record struct DownloadBridgeMessage(DownloadBridgeMessageKind Kind, string? Payload);
+
+    internal enum ScriptMessageRoute
+    {
+        None,
+        Download,
+        WebMessage,
+    }
+
+    internal enum ScriptMessageDeliveryMode
+    {
+        None,
+        ImmediateContextState,
+        Deferred,
+    }
+
+    internal enum WebMessageBridgeMessageKind
+    {
+        String,
+        Json,
+    }
+
+    internal enum ScriptMessageBodyKind
+    {
+        NativeString,
+        SerializedFoundationValue,
+    }
+
+    internal readonly record struct ScriptMessageBody(ScriptMessageBodyKind Kind, string? Payload);
+
+    internal readonly record struct WebMessageBridgeMessage(WebMessageBridgeMessageKind Kind, string? Payload);
 
     private void UpdateContextMenuDownloadUri(string? value)
     {
@@ -1433,26 +2110,149 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             return false;
         }
 
-        var block = MacOSWebKitDownloadDelegate.CreateStartDownloadBlock(_managedHandle);
-        if (block == IntPtr.Zero)
+        var context = new StartDownloadBlockContext(this);
+        try
         {
-            TraceDownload("direct-start.failed-block", uri.AbsoluteUri);
-            return false;
-        }
+            context.ManagedHandle = GCHandle.Alloc(context);
+            var block = MacOSWebKitDownloadDelegate.CreateStartDownloadBlock(context.ManagedHandle);
+            if (block == IntPtr.Zero)
+            {
+                TraceDownload("direct-start.failed-block", uri.AbsoluteUri);
+                ReleaseManagedStartDownloadContext(context);
+                return false;
+            }
 
-        _pendingStartDownloadBlocks.Add(block);
-        ObjC.SendVoidIntPtrIntPtr(ViewHandle, NativeSymbols.SelStartDownloadUsingRequestCompletionHandler, request, block);
-        TraceDownload("direct-start.invoked", $"uri={uri.AbsoluteUri}, block=0x{block.ToInt64():X}");
-        return true;
+            context.Block = block;
+            context.CreatorBlockOwned = 1;
+            _pendingStartDownloadBlocks.Add(block, context);
+            if (!MacOSNativeWebViewHostTestHooks.TryDispatchStartDownload(ViewHandle, request, block))
+            {
+                ObjC.SendVoidIntPtrIntPtr(
+                    ViewHandle,
+                    NativeSymbols.SelStartDownloadUsingRequestCompletionHandler,
+                    request,
+                    block);
+            }
+            // WebKit owns the asynchronous completion block after dispatch. The dedicated
+            // context handle remains valid until its final native block copy is disposed.
+            context.ReleaseCreatorBlock();
+            TraceDownload("direct-start.invoked", $"uri={uri.AbsoluteUri}, block=0x{block.ToInt64():X}");
+            return true;
+        }
+        catch (Exception setupException)
+        {
+            context.MarkAbandoned();
+            if (context.Block != IntPtr.Zero)
+                _pendingStartDownloadBlocks.Remove(context.Block);
+            try
+            {
+                ReleaseManagedStartDownloadContext(context);
+            }
+            catch (Exception cleanupException)
+            {
+                setupException.Data[StartDownloadSetupCleanupExceptionDataKey] = cleanupException;
+            }
+
+            throw;
+        }
     }
 
-    private void StartDownloadUsingRequestCompleted(IntPtr block, IntPtr download)
+    private void StartDownloadUsingRequestCompleted(StartDownloadBlockContext context, IntPtr block, IntPtr download)
     {
         TraceDownload("direct-start.completed", $"block=0x{block.ToInt64():X}, download=0x{download.ToInt64():X}");
-        if (_pendingStartDownloadBlocks.Remove(block))
-            MacOSWebKitDownloadDelegate.ReleaseStartDownloadBlock(block);
+        try
+        {
+            _pendingStartDownloadBlocks.Remove(block);
+            var shouldAttach = ShouldAttachCompletedStartDownload(_disposed, context.IsAbandoned);
+            MacOSNativeWebViewHostTestHooks.NotifyStartDownloadCompleted(
+                new MacOSStartDownloadCompletionSnapshot(_disposed, context.IsAbandoned, shouldAttach));
+            if (!shouldAttach)
+            {
+                CancelDownload(download);
+                return;
+            }
 
-        AttachDownloadDelegate(download);
+            AttachDownloadDelegate(download);
+        }
+        finally
+        {
+            ReleaseManagedStartDownloadContext(context);
+        }
+    }
+
+    internal static bool ShouldAttachCompletedStartDownload(bool hostDisposed, bool contextAbandoned) =>
+        !hostDisposed && !contextAbandoned;
+
+    internal static IntPtr RetainStartDownloadCompletionBlockForTests(IntPtr block) =>
+        MacOSWebKitDownloadDelegate.BlockCopy(block);
+
+    internal static void InvokeStartDownloadCompletionBlockForTests(IntPtr block, IntPtr download) =>
+        MacOSWebKitDownloadDelegate.InvokeStartDownloadCompletion(block, download);
+
+    internal static void ReleaseStartDownloadCompletionBlockForTests(IntPtr block) =>
+        MacOSWebKitDownloadDelegate.BlockRelease(block);
+
+    private void StartDownloadNativeBlockDisposed(StartDownloadBlockContext context)
+    {
+        void RemovePendingContext()
+        {
+            if (_pendingStartDownloadBlocks.Remove(context.Block, out var pending) &&
+                ReferenceEquals(pending, context))
+            {
+                try
+                {
+                    ReleaseManagedStartDownloadContext(context);
+                }
+                catch (Exception cleanupException)
+                {
+                    TraceNativeFailure("start-download.native-dispose-cleanup", cleanupException);
+                }
+            }
+        }
+
+        try
+        {
+            if (Dispatcher.UIThread.CheckAccess())
+                RemovePendingContext();
+            else
+                Dispatcher.UIThread.Post(RemovePendingContext);
+        }
+        catch (Exception exception)
+        {
+            TraceNativeFailure("start-download.native-dispose", exception);
+            try
+            {
+                ReleaseManagedStartDownloadContext(context);
+            }
+            catch (Exception cleanupException)
+            {
+                TraceNativeFailure("start-download.native-dispose-cleanup", cleanupException);
+            }
+        }
+    }
+
+    private static void ReleaseManagedStartDownloadContext(StartDownloadBlockContext context)
+    {
+        if (Interlocked.Exchange(ref context.ManagedCleanupState, 1) != 0)
+            return;
+
+        List<Exception>? failures = null;
+        TryCleanup(context.ReleaseCreatorBlock, ref failures);
+        TryCleanup(context.ReleaseManagedOwnership, ref failures);
+        if (failures is not null)
+            throw new AggregateException("Start-download block cleanup failed.", failures);
+    }
+
+    private static void TryCleanup(Action cleanup, ref List<Exception>? failures)
+    {
+        try
+        {
+            cleanup();
+        }
+        catch (Exception exception)
+        {
+            (failures ??= []).Add(exception);
+        }
     }
 
     private void DecideDownloadDestination(IntPtr download, IntPtr response, IntPtr suggestedFilename, IntPtr completionHandler)
@@ -2003,6 +2803,19 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         Trace.WriteLine($"{DownloadTracePrefix}.{stage}: {message}");
     }
 
+    private static void TraceNativeFailure(string stage, Exception exception)
+    {
+        try
+        {
+            Trace.WriteLine($"{NativeTracePrefix}.{stage}: {exception.GetType().Name}: {exception.Message}");
+        }
+        catch
+        {
+            // Reverse-P/Invoke and teardown paths must remain non-throwing even when a custom
+            // trace listener fails while reporting the original native-boundary exception.
+        }
+    }
+
     private static IntPtr CreateNSStringBackedObject(IntPtr classHandle, IntPtr selector, string value)
     {
         var nsString = CreateNSString(value);
@@ -2368,6 +3181,303 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         }
 
         public static CGRect Zero => new(new CGPoint(0, 0), new CGSize(0, 0));
+    }
+
+    private sealed class StartDownloadBlockContext
+    {
+        public StartDownloadBlockContext(MacOSNativeWebViewHost owner)
+        {
+            Owner = owner;
+        }
+
+        public MacOSNativeWebViewHost Owner { get; }
+
+        public GCHandle ManagedHandle { get; set; }
+
+        public IntPtr Block { get; set; }
+
+        public int CreatorBlockOwned;
+
+        public int ManagedCleanupState;
+
+        private int _abandoned;
+
+        private int _handleReleaseState;
+
+        internal NativeBlockOwnershipState Ownership { get; } = new();
+
+        internal bool IsManagedHandleReleased => Volatile.Read(ref _handleReleaseState) != 0;
+
+        public bool IsAbandoned => Volatile.Read(ref _abandoned) != 0;
+
+        public void MarkAbandoned() => Interlocked.Exchange(ref _abandoned, 1);
+
+        public void AddNativeOwnership() => Ownership.AddNativeOwnership();
+
+        public void ReleaseNativeOwnership()
+        {
+            var transition = Ownership.ReleaseNativeOwnership();
+            if (transition.NativeOwnershipEnded && !Ownership.IsManagedReleased)
+                Owner.StartDownloadNativeBlockDisposed(this);
+            if (transition.ReleaseHandle)
+                ReleaseManagedHandle();
+        }
+
+        public void ReleaseManagedOwnership()
+        {
+            if (Ownership.ReleaseManagedOwnership())
+                ReleaseManagedHandle();
+        }
+
+        public void ReleaseCreatorBlock()
+        {
+            if (Interlocked.Exchange(ref CreatorBlockOwned, 0) == 0)
+                return;
+
+            MacOSWebKitDownloadDelegate.ReleaseStartDownloadBlock(Block);
+        }
+
+        private void ReleaseManagedHandle()
+        {
+            if (Interlocked.Exchange(ref _handleReleaseState, 1) != 0)
+                return;
+
+            if (ManagedHandle.IsAllocated)
+                ManagedHandle.Free();
+        }
+    }
+
+    private sealed class ScriptEvaluationContext
+    {
+        public ScriptEvaluationContext(MacOSNativeWebViewHost owner, CancellationToken cancellationToken)
+        {
+            Owner = owner;
+            CancellationToken = cancellationToken;
+            Completion = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        public MacOSNativeWebViewHost Owner { get; }
+
+        public CancellationToken CancellationToken { get; }
+
+        public TaskCompletionSource<string?> Completion { get; }
+
+        public ScriptEvaluationDispatchState DispatchState { get; } = new();
+
+        public CancellationTokenRegistration CancellationRegistration { get; set; }
+
+        public GCHandle ManagedHandle { get; set; }
+
+        public IntPtr Block { get; set; }
+
+        public int CreatorBlockOwned;
+
+        public int ManagedCleanupState;
+
+        private int _handleReleaseState;
+
+        internal NativeBlockOwnershipState Ownership { get; } = new();
+
+        internal bool IsManagedHandleReleased => Volatile.Read(ref _handleReleaseState) != 0;
+
+        public void AddNativeOwnership() => Ownership.AddNativeOwnership();
+
+        public void ReleaseNativeOwnership()
+        {
+            var transition = Ownership.ReleaseNativeOwnership();
+            if (transition.NativeOwnershipEnded && !Ownership.IsManagedReleased)
+                Owner.ScriptEvaluationNativeBlockDisposed(this);
+            if (transition.ReleaseHandle)
+                ReleaseManagedHandle();
+        }
+
+        public void ReleaseManagedOwnership()
+        {
+            if (Ownership.ReleaseManagedOwnership())
+                ReleaseManagedHandle();
+        }
+
+        public void ReleaseCreatorBlock()
+        {
+            if (Interlocked.Exchange(ref CreatorBlockOwned, 0) == 0)
+                return;
+
+            MacOSWebKitDownloadDelegate.ReleaseScriptEvaluationBlock(Block);
+        }
+
+        private void ReleaseManagedHandle()
+        {
+            if (Interlocked.Exchange(ref _handleReleaseState, 1) != 0)
+                return;
+
+            if (ManagedHandle.IsAllocated)
+                ManagedHandle.Free();
+        }
+    }
+
+    internal sealed class NativeBlockOwnershipState
+    {
+        // The GCHandle is valid until both the managed pending entry and every physical native
+        // block copy have gone away. Objective-C retains of one heap block do not create copies.
+        private int _managedReleased;
+        private int _nativeOwnershipCount;
+        private int _handleReleaseSignaled;
+
+        internal bool IsManagedReleased => Volatile.Read(ref _managedReleased) != 0;
+
+        internal int NativeOwnershipCount => Volatile.Read(ref _nativeOwnershipCount);
+
+        internal void AddNativeOwnership() => Interlocked.Increment(ref _nativeOwnershipCount);
+
+        internal NativeBlockReleaseTransition ReleaseNativeOwnership()
+        {
+            var remaining = Interlocked.Decrement(ref _nativeOwnershipCount);
+            if (remaining < 0)
+                throw new InvalidOperationException("The native block ownership count became negative.");
+
+            var ended = remaining == 0;
+            return new NativeBlockReleaseTransition(
+                ended,
+                ended && TrySignalHandleRelease());
+        }
+
+        internal bool ReleaseManagedOwnership()
+        {
+            if (Interlocked.Exchange(ref _managedReleased, 1) != 0)
+                return false;
+
+            return TrySignalHandleRelease();
+        }
+
+        private bool TrySignalHandleRelease() =>
+            IsManagedReleased &&
+            NativeOwnershipCount == 0 &&
+            Interlocked.CompareExchange(ref _handleReleaseSignaled, 1, 0) == 0;
+    }
+
+    internal readonly record struct NativeBlockReleaseTransition(
+        bool NativeOwnershipEnded,
+        bool ReleaseHandle);
+
+    internal sealed class ScriptEvaluationDispatchState
+    {
+        private int _state;
+
+        internal ScriptEvaluationDispatchStatus Status =>
+            (ScriptEvaluationDispatchStatus)Volatile.Read(ref _state);
+
+        internal bool TryMarkDispatched() => Interlocked.CompareExchange(
+            ref _state,
+            (int)ScriptEvaluationDispatchStatus.Dispatched,
+            (int)ScriptEvaluationDispatchStatus.Pending) == (int)ScriptEvaluationDispatchStatus.Pending;
+
+        internal bool TryCancelBeforeDispatch() => Interlocked.CompareExchange(
+            ref _state,
+            (int)ScriptEvaluationDispatchStatus.CanceledBeforeDispatch,
+            (int)ScriptEvaluationDispatchStatus.Pending) == (int)ScriptEvaluationDispatchStatus.Pending;
+    }
+
+    internal enum ScriptEvaluationDispatchStatus
+    {
+        Pending,
+        Dispatched,
+        CanceledBeforeDispatch,
+    }
+
+    internal enum NativeResourceCleanupFailureRisk
+    {
+        None,
+        ManagedOwnerMayRemainReachable,
+    }
+
+    internal readonly record struct NativeResourceCleanupResult(
+        IReadOnlyList<Exception> Exceptions,
+        bool ManagedOwnerHandleRetained)
+    {
+        internal static NativeResourceCleanupResult Empty { get; } = new([], ManagedOwnerHandleRetained: false);
+    }
+
+    internal sealed class NativeResourceCleanupCoordinator
+    {
+        private readonly List<NativeResourceReleaseAction> _releaseActions = [];
+        private Action? _managedOwnerRelease;
+        private int _state;
+
+        internal void Register(
+            Action release,
+            NativeResourceCleanupFailureRisk failureRisk = NativeResourceCleanupFailureRisk.None)
+        {
+            ArgumentNullException.ThrowIfNull(release);
+            if (Volatile.Read(ref _state) != 0)
+                throw new InvalidOperationException("Cleanup actions cannot be registered after commit or rollback.");
+
+            _releaseActions.Add(new NativeResourceReleaseAction(release, failureRisk));
+        }
+
+        internal void RegisterManagedOwnerRelease(Action release)
+        {
+            ArgumentNullException.ThrowIfNull(release);
+            if (Volatile.Read(ref _state) != 0)
+                throw new InvalidOperationException("Cleanup actions cannot be registered after commit or rollback.");
+            if (_managedOwnerRelease is not null)
+                throw new InvalidOperationException("The managed owner release action has already been registered.");
+
+            _managedOwnerRelease = release;
+        }
+
+        internal void Commit()
+        {
+            if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
+                return;
+
+            _releaseActions.Clear();
+            _managedOwnerRelease = null;
+        }
+
+        internal NativeResourceCleanupResult Rollback()
+        {
+            if (Interlocked.CompareExchange(ref _state, 2, 0) != 0)
+                return NativeResourceCleanupResult.Empty;
+
+            List<Exception>? exceptions = null;
+            var managedOwnerMayRemainReachable = false;
+            for (var index = _releaseActions.Count - 1; index >= 0; index--)
+            {
+                var releaseAction = _releaseActions[index];
+                try
+                {
+                    releaseAction.Release();
+                }
+                catch (Exception exception)
+                {
+                    (exceptions ??= []).Add(exception);
+                    if (releaseAction.FailureRisk == NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable)
+                        managedOwnerMayRemainReachable = true;
+                }
+            }
+
+            _releaseActions.Clear();
+            var managedOwnerHandleRetained = managedOwnerMayRemainReachable && _managedOwnerRelease is not null;
+            if (!managedOwnerMayRemainReachable && _managedOwnerRelease is not null)
+            {
+                try
+                {
+                    _managedOwnerRelease();
+                }
+                catch (Exception exception)
+                {
+                    (exceptions ??= []).Add(exception);
+                    managedOwnerHandleRetained = true;
+                }
+            }
+
+            _managedOwnerRelease = null;
+            return new NativeResourceCleanupResult(exceptions ?? [], managedOwnerHandleRetained);
+        }
+
+        private readonly record struct NativeResourceReleaseAction(
+            Action Release,
+            NativeResourceCleanupFailureRisk FailureRisk);
     }
 
     private sealed class DownloadContext : IDisposable
@@ -3038,11 +4148,13 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public const nint WKNavigationResponsePolicyAllow = 1;
         public const nint WKNavigationResponsePolicyDownload = 2;
         private const string ManagedHandleIvarName = "_managedHandle";
+        private const int BlockHasCopyDispose = 1 << 25;
         private const int BlockHasSignature = 1 << 30;
 
         private static readonly Lazy<IntPtr> DelegateClass = new(CreateDelegateClass);
         private static readonly Lazy<IntPtr> StartDownloadBlockDescriptor = new(CreateStartDownloadBlockDescriptor);
         private static readonly Lazy<IntPtr> DownloadContextBlockDescriptor = new(CreateDownloadContextBlockDescriptor);
+        private static readonly Lazy<IntPtr> ScriptEvaluationBlockDescriptor = new(CreateScriptEvaluationBlockDescriptor);
         private static readonly DecidePolicyForNavigationActionDelegate DecidePolicyForNavigationActionCallback = DecidePolicyForNavigationAction;
         private static readonly DecidePolicyForNavigationActionWithPreferencesDelegate DecidePolicyForNavigationActionWithPreferencesCallback = DecidePolicyForNavigationActionWithPreferences;
         private static readonly DecidePolicyForNavigationResponseDelegate DecidePolicyForNavigationResponseCallback = DecidePolicyForNavigationResponse;
@@ -3058,8 +4170,13 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         private static readonly ScriptMessageReceivedDelegate ScriptMessageReceivedCallback = ScriptMessageReceived;
         private static readonly CreateWebViewDelegate CreateWebViewCallback = CreateWebView;
         private static readonly StartDownloadCompletionDelegate StartDownloadCompletionCallback = StartDownloadCompleted;
+        private static readonly NativeBlockCopyDelegate StartDownloadBlockCopyCallback = StartDownloadBlockCopied;
+        private static readonly NativeBlockDisposeDelegate StartDownloadBlockDisposeCallback = StartDownloadBlockDisposed;
         private static readonly DownloadContextCompletionDelegate PauseDownloadCompletedCallback = PauseDownloadCompleted;
         private static readonly DownloadContextCompletionDelegate ResumeDownloadCompletedCallback = ResumeDownloadCompleted;
+        private static readonly ScriptEvaluationCompletionDelegate ScriptEvaluationCompletedCallback = ScriptEvaluationCompleted;
+        private static readonly NativeBlockCopyDelegate ScriptEvaluationBlockCopyCallback = ScriptEvaluationBlockCopied;
+        private static readonly NativeBlockDisposeDelegate ScriptEvaluationBlockDisposeCallback = ScriptEvaluationBlockDisposed;
 
         public static IntPtr Create(GCHandle ownerHandle)
         {
@@ -3101,6 +4218,16 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             invoke(completionHandler, destination);
         }
 
+        public static void InvokeStartDownloadCompletion(IntPtr completionHandler, IntPtr download)
+        {
+            if (completionHandler == IntPtr.Zero)
+                return;
+
+            var block = Marshal.PtrToStructure<BlockLiteral>(completionHandler);
+            var invoke = Marshal.GetDelegateForFunctionPointer<StartDownloadCompletionDelegate>(block.Invoke);
+            invoke(completionHandler, download);
+        }
+
         public static IntPtr BlockCopy(IntPtr block)
         {
             return block == IntPtr.Zero ? IntPtr.Zero : Blocks.Block_copy(block);
@@ -3112,7 +4239,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
                 Blocks.Block_release(block);
         }
 
-        public static IntPtr CreateStartDownloadBlock(GCHandle ownerHandle)
+        public static IntPtr CreateStartDownloadBlock(GCHandle contextHandle)
         {
             var concreteBlockClass = Blocks.GetConcreteStackBlockClass();
             if (concreteBlockClass == IntPtr.Zero)
@@ -3121,11 +4248,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             var literal = new StartDownloadBlockLiteral
             {
                 Isa = concreteBlockClass,
-                Flags = BlockHasSignature,
+                Flags = BlockHasCopyDispose | BlockHasSignature,
                 Reserved = 0,
                 Invoke = Marshal.GetFunctionPointerForDelegate(StartDownloadCompletionCallback),
                 Descriptor = StartDownloadBlockDescriptor.Value,
-                OwnerHandle = GCHandle.ToIntPtr(ownerHandle),
+                ContextHandle = GCHandle.ToIntPtr(contextHandle),
             };
 
             var stackBlock = Marshal.AllocHGlobal(Marshal.SizeOf<StartDownloadBlockLiteral>());
@@ -3141,6 +4268,39 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         }
 
         public static void ReleaseStartDownloadBlock(IntPtr block)
+        {
+            BlockRelease(block);
+        }
+
+        public static IntPtr CreateScriptEvaluationBlock(GCHandle contextHandle)
+        {
+            var concreteBlockClass = Blocks.GetConcreteStackBlockClass();
+            if (concreteBlockClass == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            var literal = new ScriptEvaluationBlockLiteral
+            {
+                Isa = concreteBlockClass,
+                Flags = BlockHasCopyDispose | BlockHasSignature,
+                Reserved = 0,
+                Invoke = Marshal.GetFunctionPointerForDelegate(ScriptEvaluationCompletedCallback),
+                Descriptor = ScriptEvaluationBlockDescriptor.Value,
+                ContextHandle = GCHandle.ToIntPtr(contextHandle),
+            };
+
+            var stackBlock = Marshal.AllocHGlobal(Marshal.SizeOf<ScriptEvaluationBlockLiteral>());
+            try
+            {
+                Marshal.StructureToPtr(literal, stackBlock, fDeleteOld: false);
+                return Blocks.Block_copy(stackBlock);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(stackBlock);
+            }
+        }
+
+        public static void ReleaseScriptEvaluationBlock(IntPtr block)
         {
             BlockRelease(block);
         }
@@ -3392,10 +4552,22 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
         private static void ScriptMessageReceived(IntPtr self, IntPtr selector, IntPtr userContentController, IntPtr message)
         {
-            _ = selector;
-            _ = userContentController;
-            var body = ObjC.SendIntPtr(message, NativeSymbols.SelBody);
-            GetOwner(self)?.HandleDownloadBridgeMessage(ObjC.StringFromNSString(body));
+            try
+            {
+                _ = selector;
+                _ = userContentController;
+                var owner = GetOwner(self);
+                if (owner is null)
+                    return;
+
+                var body = ObjC.SendIntPtr(message, NativeSymbols.SelBody);
+                var name = ObjC.SendIntPtr(message, NativeSymbols.SelName);
+                owner.RouteScriptMessageFromNative(ObjC.StringFromNSString(name), ConvertScriptMessageBody(body));
+            }
+            catch (Exception exception)
+            {
+                TraceNativeFailure("script-message.callback", exception);
+            }
         }
 
         private static IntPtr CreateWebView(IntPtr self, IntPtr selector, IntPtr webView, IntPtr configuration, IntPtr navigationAction, IntPtr windowFeatures)
@@ -3410,12 +4582,118 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
         private static void StartDownloadCompleted(IntPtr block, IntPtr download)
         {
-            var literal = Marshal.PtrToStructure<StartDownloadBlockLiteral>(block);
-            var owner = literal.OwnerHandle == IntPtr.Zero
-                ? null
-                : GCHandle.FromIntPtr(literal.OwnerHandle).Target as MacOSNativeWebViewHost;
+            try
+            {
+                var literal = Marshal.PtrToStructure<StartDownloadBlockLiteral>(block);
+                if (literal.ContextHandle != IntPtr.Zero &&
+                    GCHandle.FromIntPtr(literal.ContextHandle).Target is StartDownloadBlockContext context)
+                {
+                    context.Owner.StartDownloadUsingRequestCompleted(context, block, download);
+                }
+                else
+                {
+                    CancelDownload(download);
+                }
+            }
+            catch (Exception exception)
+            {
+                TraceNativeFailure("start-download.callback", exception);
+                try
+                {
+                    CancelDownload(download);
+                }
+                catch (Exception cancelException)
+                {
+                    TraceNativeFailure("start-download.callback-cancel", cancelException);
+                }
+            }
+        }
 
-            owner?.StartDownloadUsingRequestCompleted(block, download);
+        private static void StartDownloadBlockCopied(IntPtr destination, IntPtr source)
+        {
+            _ = source;
+            try
+            {
+                var literal = Marshal.PtrToStructure<StartDownloadBlockLiteral>(destination);
+                if (literal.ContextHandle != IntPtr.Zero &&
+                    GCHandle.FromIntPtr(literal.ContextHandle).Target is StartDownloadBlockContext context)
+                {
+                    context.AddNativeOwnership();
+                }
+            }
+            catch
+            {
+                // Exceptions must never cross an Objective-C block ABI callback.
+            }
+        }
+
+        private static void StartDownloadBlockDisposed(IntPtr block)
+        {
+            try
+            {
+                var literal = Marshal.PtrToStructure<StartDownloadBlockLiteral>(block);
+                if (literal.ContextHandle != IntPtr.Zero &&
+                    GCHandle.FromIntPtr(literal.ContextHandle).Target is StartDownloadBlockContext context)
+                {
+                    context.ReleaseNativeOwnership();
+                }
+            }
+            catch
+            {
+                // Exceptions must never cross an Objective-C block ABI callback.
+            }
+        }
+
+        private static void ScriptEvaluationCompleted(IntPtr block, IntPtr result, IntPtr error)
+        {
+            try
+            {
+                var literal = Marshal.PtrToStructure<ScriptEvaluationBlockLiteral>(block);
+                if (literal.ContextHandle != IntPtr.Zero &&
+                    GCHandle.FromIntPtr(literal.ContextHandle).Target is ScriptEvaluationContext context)
+                {
+                    context.Owner.ScriptEvaluationCompleted(block, result, error);
+                }
+            }
+            catch (Exception exception)
+            {
+                TraceNativeFailure("script-evaluation.callback", exception);
+            }
+        }
+
+        private static void ScriptEvaluationBlockCopied(IntPtr destination, IntPtr source)
+        {
+            _ = source;
+            try
+            {
+                var literal = Marshal.PtrToStructure<ScriptEvaluationBlockLiteral>(destination);
+                if (literal.ContextHandle != IntPtr.Zero &&
+                    GCHandle.FromIntPtr(literal.ContextHandle).Target is ScriptEvaluationContext context)
+                {
+                    context.AddNativeOwnership();
+                }
+            }
+            catch
+            {
+                // Exceptions must never cross an Objective-C block ABI callback.
+            }
+        }
+
+        private static void ScriptEvaluationBlockDisposed(IntPtr block)
+        {
+            try
+            {
+                var literal = Marshal.PtrToStructure<ScriptEvaluationBlockLiteral>(block);
+                if (literal.ContextHandle != IntPtr.Zero &&
+                    GCHandle.FromIntPtr(literal.ContextHandle).Target is ScriptEvaluationContext context)
+                {
+                    context.ReleaseNativeOwnership();
+                }
+            }
+            catch
+            {
+                // Exceptions must never cross an Objective-C block ABI callback.
+            }
         }
 
         private static void PauseDownloadCompleted(IntPtr block, IntPtr resumeData)
@@ -3481,14 +4759,16 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
         private static IntPtr CreateStartDownloadBlockDescriptor()
         {
-            var descriptor = new BlockDescriptor
+            var descriptor = new BlockCopyDisposeDescriptor
             {
                 Reserved = UIntPtr.Zero,
                 Size = (UIntPtr)Marshal.SizeOf<StartDownloadBlockLiteral>(),
+                CopyHelper = Marshal.GetFunctionPointerForDelegate(StartDownloadBlockCopyCallback),
+                DisposeHelper = Marshal.GetFunctionPointerForDelegate(StartDownloadBlockDisposeCallback),
                 Signature = Marshal.StringToHGlobalAnsi("v@?@"),
             };
 
-            var handle = Marshal.AllocHGlobal(Marshal.SizeOf<BlockDescriptor>());
+            var handle = Marshal.AllocHGlobal(Marshal.SizeOf<BlockCopyDisposeDescriptor>());
             Marshal.StructureToPtr(descriptor, handle, fDeleteOld: false);
             return handle;
         }
@@ -3503,6 +4783,22 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             };
 
             var handle = Marshal.AllocHGlobal(Marshal.SizeOf<BlockDescriptor>());
+            Marshal.StructureToPtr(descriptor, handle, fDeleteOld: false);
+            return handle;
+        }
+
+        private static IntPtr CreateScriptEvaluationBlockDescriptor()
+        {
+            var descriptor = new BlockCopyDisposeDescriptor
+            {
+                Reserved = UIntPtr.Zero,
+                Size = (UIntPtr)Marshal.SizeOf<ScriptEvaluationBlockLiteral>(),
+                CopyHelper = Marshal.GetFunctionPointerForDelegate(ScriptEvaluationBlockCopyCallback),
+                DisposeHelper = Marshal.GetFunctionPointerForDelegate(ScriptEvaluationBlockDisposeCallback),
+                Signature = Marshal.StringToHGlobalAnsi("v@?@@"),
+            };
+
+            var handle = Marshal.AllocHGlobal(Marshal.SizeOf<BlockCopyDisposeDescriptor>());
             Marshal.StructureToPtr(descriptor, handle, fDeleteOld: false);
             return handle;
         }
@@ -3525,11 +4821,22 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             public int Reserved;
             public IntPtr Invoke;
             public IntPtr Descriptor;
-            public IntPtr OwnerHandle;
+            public IntPtr ContextHandle;
         }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct DownloadContextBlockLiteral
+        {
+            public IntPtr Isa;
+            public int Flags;
+            public int Reserved;
+            public IntPtr Invoke;
+            public IntPtr Descriptor;
+            public IntPtr ContextHandle;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ScriptEvaluationBlockLiteral
         {
             public IntPtr Isa;
             public int Flags;
@@ -3547,6 +4854,16 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             public IntPtr Signature;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BlockCopyDisposeDescriptor
+        {
+            public UIntPtr Reserved;
+            public UIntPtr Size;
+            public IntPtr CopyHelper;
+            public IntPtr DisposeHelper;
+            public IntPtr Signature;
+        }
+
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void PolicyDecisionBlock(IntPtr block, nint policy);
 
@@ -3555,6 +4872,15 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void DownloadDestinationBlock(IntPtr block, IntPtr destination);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void ScriptEvaluationCompletionDelegate(IntPtr block, IntPtr result, IntPtr error);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void NativeBlockCopyDelegate(IntPtr destination, IntPtr source);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void NativeBlockDisposeDelegate(IntPtr block);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void DecidePolicyForNavigationActionDelegate(
@@ -3698,6 +5024,14 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         private static extern IntPtr objc_msgSend_IntPtr_IntPtr_NUInt(IntPtr receiver, IntPtr selector, IntPtr arg1, nuint arg2);
 
         [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSend")]
+        private static extern IntPtr objc_msgSend_IntPtr_IntPtr_NUInt_IntPtr(
+            IntPtr receiver,
+            IntPtr selector,
+            IntPtr arg1,
+            nuint arg2,
+            IntPtr arg3);
+
+        [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSend")]
         private static extern IntPtr objc_msgSend_IntPtr_IntPtr_IntPtr_IntPtr(
             IntPtr receiver,
             IntPtr selector,
@@ -3830,6 +5164,16 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static IntPtr SendIntPtrIntPtrNUInt(IntPtr receiver, IntPtr selector, IntPtr arg1, nuint arg2)
         {
             return objc_msgSend_IntPtr_IntPtr_NUInt(receiver, selector, arg1, arg2);
+        }
+
+        public static IntPtr SendIntPtrIntPtrNUIntIntPtr(
+            IntPtr receiver,
+            IntPtr selector,
+            IntPtr arg1,
+            nuint arg2,
+            IntPtr arg3)
+        {
+            return objc_msgSend_IntPtr_IntPtr_NUInt_IntPtr(receiver, selector, arg1, arg2, arg3);
         }
 
         public static IntPtr SendIntPtrIntPtrIntPtrIntPtr(IntPtr receiver, IntPtr selector, IntPtr arg1, IntPtr arg2, IntPtr arg3)

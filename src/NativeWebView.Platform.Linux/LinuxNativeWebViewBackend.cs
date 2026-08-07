@@ -1254,6 +1254,29 @@ public sealed class LinuxNativeWebViewBackend
             }
         }
 
+        foreach (var documentStartScript in _instanceConfiguration.DocumentStartScripts)
+        {
+            var frameScope = documentStartScript.FrameScope == NativeWebViewScriptFrameScope.MainFrame
+                ? LinuxNativeInterop.WebKitUserContentInjectedFrames.TopFrame
+                : LinuxNativeInterop.WebKitUserContentInjectedFrames.AllFrames;
+            var script = LinuxNativeInterop.webkit_user_script_new(
+                documentStartScript.Source,
+                frameScope,
+                LinuxNativeInterop.WebKitUserScriptInjectionTime.DocumentStart,
+                IntPtr.Zero,
+                IntPtr.Zero);
+            if (script == IntPtr.Zero)
+                throw new InvalidOperationException("WebKitGTK did not register a requested document-start script.");
+            try
+            {
+                LinuxNativeInterop.webkit_user_content_manager_add_script(_userContentManager, script);
+            }
+            finally
+            {
+                LinuxNativeInterop.webkit_user_script_unref(script);
+            }
+        }
+
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "load-changed", new LinuxNativeInterop.LoadChangedSignal(OnLoadChanged)));
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "load-failed", new LinuxNativeInterop.LoadFailedSignal(OnLoadFailed)));
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "decide-policy", new LinuxNativeInterop.DecidePolicySignal(OnDecidePolicy)));

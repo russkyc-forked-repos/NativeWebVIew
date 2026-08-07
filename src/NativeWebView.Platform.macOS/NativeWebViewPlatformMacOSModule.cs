@@ -11,7 +11,7 @@ public static class NativeWebViewPlatformMacOSModule
         factory.RegisterNativeWebViewBackend(
             NativeWebViewPlatform.MacOS,
             static () => new MacOSNativeWebViewBackend(),
-            MacOSPlatformFeatures.Instance);
+            MacOSPlatformFeatures.EmbeddedInstance);
 
         factory.RegisterPlatformDiagnostics(
             NativeWebViewPlatform.MacOS,

@@ -31,5 +31,6 @@ internal static class WindowsPlatformFeatures
         NativeWebViewFeature.RenderFrameCapture |
         NativeWebViewFeature.ProxyConfiguration |
         NativeWebViewFeature.Favicon |
-        NativeWebViewFeature.Downloads);
+        NativeWebViewFeature.Downloads |
+        NativeWebViewFeature.DocumentStartScriptInjection);
 }
