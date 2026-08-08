@@ -91,6 +91,7 @@ internal static class MacOSNativeWebViewHostTestHooks
 
 internal sealed class MacOSNativeWebViewHost : IDisposable
 {
+    private const string JavaScriptExceptionMessageErrorKey = "WKJavaScriptExceptionMessage";
     private const string DownloadTracePrefix = "NativeWebView.macOS.download";
     private const string NativeTracePrefix = "NativeWebView.macOS.native";
     internal const string ConstructionCleanupExceptionsDataKey = "NativeWebView.macOS.ConstructionCleanupExceptions";
@@ -227,6 +228,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static readonly IntPtr SelTotalUnitCount = ObjC.GetSelector("totalUnitCount");
         public static readonly IntPtr SelCancel = ObjC.GetSelector("cancel:");
         public static readonly IntPtr SelLocalizedDescription = ObjC.GetSelector("localizedDescription");
+        public static readonly IntPtr SelUserInfo = ObjC.GetSelector("userInfo");
         public static readonly IntPtr SelCode = ObjC.GetSelector("code");
         public static readonly IntPtr SelSharedApplication = ObjC.GetSelector("sharedApplication");
         public static readonly IntPtr SelTerminate = ObjC.GetSelector("terminate:");
@@ -1443,7 +1445,8 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         {
             if (error != IntPtr.Zero)
             {
-                var message = ResolveErrorMessage(error) ?? "WKWebView JavaScript evaluation failed.";
+                var message = ResolveJavaScriptEvaluationErrorMessage(error) ??
+                              "WKWebView JavaScript evaluation failed.";
                 context.Completion.TrySetException(new InvalidOperationException(message));
             }
             else
@@ -2879,6 +2882,50 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         return error == IntPtr.Zero
             ? null
             : ObjC.StringFromNSString(ObjC.SendIntPtr(error, NativeSymbols.SelLocalizedDescription));
+    }
+
+    private static string? ResolveJavaScriptEvaluationErrorMessage(IntPtr error)
+    {
+        var localizedDescription = ResolveErrorMessage(error);
+        if (error == IntPtr.Zero)
+            return localizedDescription;
+
+        try
+        {
+            var userInfo = ObjC.SendIntPtr(error, NativeSymbols.SelUserInfo);
+            var exceptionMessage = userInfo == IntPtr.Zero
+                ? null
+                : ObjC.StringFromNSString(
+                    ObjC.SendIntPtrIntPtr(
+                        userInfo,
+                        NativeSymbols.SelObjectForKey,
+                        CreateNSString(JavaScriptExceptionMessageErrorKey)));
+            return CombineJavaScriptEvaluationErrorMessage(localizedDescription, exceptionMessage);
+        }
+        catch
+        {
+            // The JavaScript exception key is WebKit-specific. Preserve NSError's standard
+            // localized description if it is unavailable on a particular runtime.
+            return localizedDescription;
+        }
+    }
+
+    internal static string? CombineJavaScriptEvaluationErrorMessage(
+        string? localizedDescription,
+        string? exceptionMessage)
+    {
+        var description = string.IsNullOrWhiteSpace(localizedDescription)
+            ? null
+            : localizedDescription.Trim();
+        var detail = string.IsNullOrWhiteSpace(exceptionMessage)
+            ? null
+            : exceptionMessage.Trim();
+
+        if (description is null)
+            return detail;
+        if (detail is null || description.Contains(detail, StringComparison.OrdinalIgnoreCase))
+            return description;
+        return $"{description}: {detail}";
     }
 
     private static string? ResolveErrorCode(IntPtr error)
