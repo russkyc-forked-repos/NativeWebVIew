@@ -699,6 +699,31 @@ public sealed class InstanceConfigurationTests
     }
 
     [Theory]
+    [InlineData(
+        "A JavaScript exception occurred",
+        "Error: integration-script-error",
+        "A JavaScript exception occurred: Error: integration-script-error")]
+    [InlineData(null, "Error: integration-script-error", "Error: integration-script-error")]
+    [InlineData("A JavaScript exception occurred", null, "A JavaScript exception occurred")]
+    [InlineData(
+        "A JavaScript exception occurred: Error: integration-script-error",
+        "Error: integration-script-error",
+        "A JavaScript exception occurred: Error: integration-script-error")]
+    [InlineData("  A JavaScript exception occurred  ", "   ", "A JavaScript exception occurred")]
+    [InlineData(null, null, null)]
+    public void MacOSJavaScriptEvaluationError_CombinesWebKitDetailWithLocalizedDescription(
+        string? localizedDescription,
+        string? exceptionMessage,
+        string? expected)
+    {
+        Assert.Equal(
+            expected,
+            MacOSNativeWebViewHost.CombineJavaScriptEvaluationErrorMessage(
+                localizedDescription,
+                exceptionMessage));
+    }
+
+    [Theory]
     [InlineData(false, false, true)]
     [InlineData(true, false, false)]
     [InlineData(false, true, false)]

@@ -33,6 +33,8 @@ End-user installs are typically `NativeWebView` plus the platform package for th
 - `WebAuthenticationBroker` facade for OAuth and interactive sign-in.
 - Platform backends for Windows, macOS, Linux, iOS, Android, and Browser.
 - Optional airspace-mitigation modes: `Embedded`, `GpuSurface`, and `Offscreen`.
+- One-shot PNG snapshots of the visible embedded viewport on Windows, Linux, and macOS.
+- Native hover/status text on Windows and Linux, independent of the engine's native status-bar visibility.
 - Diagnostics, capability reporting, render-frame export, integrity metadata, and smoke-testable sample apps.
 
 ## Current Repo Runtime Status
@@ -127,10 +129,13 @@ Useful runtime APIs:
 - `webView.RenderStatistics` and `webView.GetRenderStatisticsSnapshot()`
 - `webView.ResetRenderStatistics()`
 - `await webView.CaptureRenderFrameAsync()`
+- `await webView.CaptureSnapshotAsync()` for a one-shot embedded viewport PNG
 - `await webView.SaveRenderFrameAsync("artifacts/frame.png")`
 - `await webView.SaveRenderFrameWithMetadataAsync("artifacts/frame.png", "artifacts/frame.json")`
 
 Render sidecar metadata includes `FrameId`, `CapturedAtUtc`, `RenderMode`, `Origin`, `PixelDataLength`, and `PixelDataSha256`. Integrity verification requires matching `FormatVersion`.
+
+`StatusText` and `StatusTextChanged` expose bounded native hover/link status on platforms that advertise `NativeWebViewFeature.StatusText`. Setting `IsStatusBarEnabled` to `false` hides the engine-provided status UI but does not suppress these events. Embedded snapshot capture is best-effort: cancellation propagates, while unsupported, uninitialized, unavailable, and failed captures return `null`.
 
 ## Samples
 

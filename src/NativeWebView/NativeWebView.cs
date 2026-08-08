@@ -82,6 +82,8 @@ public class NativeWebView : NativeControlHost, IDisposable
     private EventHandler<CoreWebViewEnvironmentRequestedEventArgs>? _coreWebView2EnvironmentRequested;
     private EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? _coreWebView2ControllerOptionsRequested;
     private EventHandler<NativeWebViewFaviconChangedEventArgs>? _faviconChanged;
+    private EventHandler<NativeWebViewStatusTextChangedEventArgs>? _statusTextChanged;
+    private readonly NativeWebViewStatusDispatchQueue _statusTextDispatchQueue = new();
 
     public static readonly StyledProperty<NativeWebViewRenderMode> RenderModeProperty =
         AvaloniaProperty.Register<NativeWebView, NativeWebViewRenderMode>(nameof(RenderMode), NativeWebViewRenderMode.Embedded);
@@ -195,6 +197,10 @@ public class NativeWebView : NativeControlHost, IDisposable
         set => _controller.IsContextMenuEnabled = value;
     }
 
+    /// <summary>Gets or sets whether the browser engine may display its native status UI.</summary>
+    /// <remarks>
+    /// Disabling the native status UI does not suppress <see cref="StatusTextChanged"/>.
+    /// </remarks>
     public bool IsStatusBarEnabled
     {
         get => _controller.IsStatusBarEnabled;
@@ -212,6 +218,10 @@ public class NativeWebView : NativeControlHost, IDisposable
     public string? HeaderString => _controller.HeaderString;
 
     public string? UserAgentString => _controller.UserAgentString;
+
+    /// <summary>Gets the current browser status text, such as a hovered link target.</summary>
+    /// <remarks>Unusually long page-controlled values may be truncated.</remarks>
+    public string? StatusText => _controller.StatusText;
 
     public event EventHandler<CoreWebViewInitializedEventArgs>? CoreWebView2Initialized
     {
@@ -346,6 +356,13 @@ public class NativeWebView : NativeControlHost, IDisposable
         remove => _faviconChanged -= value;
     }
 
+    /// <summary>Occurs when <see cref="StatusText"/> changes.</summary>
+    public event EventHandler<NativeWebViewStatusTextChangedEventArgs>? StatusTextChanged
+    {
+        add => _statusTextChanged += value;
+        remove => _statusTextChanged -= value;
+    }
+
     public event EventHandler<NativeWebViewRenderFrameCapturedEventArgs>? RenderFrameCaptured;
 
     public bool SupportsRenderMode(NativeWebViewRenderMode renderMode)
@@ -390,6 +407,98 @@ public class NativeWebView : NativeControlHost, IDisposable
         }
 
         return await CaptureAndRenderFrameAsync(cancellationToken).ConfigureAwait(true);
+    }
+
+    /// <summary>Captures the visible viewport of an initialized embedded native WebView as PNG data.</summary>
+    /// <remarks>
+    /// This operation is best-effort and returns <see langword="null"/> when the platform does not support
+    /// embedded snapshots, the control is uninitialized, or a native capture is temporarily unavailable or fails.
+    /// Cancellation is propagated to the caller.
+    /// </remarks>
+    public async Task<NativeWebViewSnapshot?> CaptureSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var capture = BeginCaptureSnapshot(cancellationToken);
+            return await capture.Completion.ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // Embedded snapshots are a best-effort visual fallback for native airspace.
+            return null;
+        }
+    }
+
+    /// <summary>Begins an embedded snapshot and exposes when native capture registration is complete.</summary>
+    /// <remarks>
+    /// The registration milestone allows native-airspace hosts to hide the embedded surface only after the
+    /// platform has accepted the capture request. Unsupported and failed captures complete with
+    /// <see langword="null"/>.
+    /// </remarks>
+    public NativeWebViewSnapshotCapture BeginCaptureSnapshot(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_isDisposed)
+            throw new ObjectDisposedException(nameof(NativeWebView));
+        if (!IsInitialized || !Features.Supports(NativeWebViewFeature.EmbeddedSnapshotCapture))
+            return NativeWebViewSnapshotCapture.FromResult(null);
+
+        try
+        {
+            if (_macOSHost is not null)
+                return NormalizeSnapshotCapture(
+                    _macOSHost.BeginCaptureSnapshot(cancellationToken),
+                    cancellationToken);
+
+            if (_controller.TryGetBackend<INativeWebViewSnapshotProvider>(out var snapshotProvider))
+                return NormalizeSnapshotCapture(
+                    snapshotProvider.BeginCaptureSnapshot(cancellationToken),
+                    cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // Embedded snapshots are a best-effort visual fallback for native airspace.
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        return NativeWebViewSnapshotCapture.FromResult(null);
+    }
+
+    private static NativeWebViewSnapshotCapture NormalizeSnapshotCapture(
+        NativeWebViewSnapshotCapture capture,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(capture);
+        return new NativeWebViewSnapshotCapture(
+            capture.CaptureStarted,
+            NormalizeSnapshotCompletionAsync(capture.Completion, cancellationToken));
+    }
+
+    private static async Task<NativeWebViewSnapshot?> NormalizeSnapshotCompletionAsync(
+        Task<NativeWebViewSnapshot?> completion,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await completion.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return null;
+        }
     }
 
     public NativeWebViewRenderStatistics GetRenderStatisticsSnapshot()
@@ -437,6 +546,7 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.CoreWebView2EnvironmentRequested += ForwardCoreWebView2EnvironmentRequested;
         _controller.CoreWebView2ControllerOptionsRequested += ForwardCoreWebView2ControllerOptionsRequested;
         _controller.FaviconChanged += ForwardFaviconChanged;
+        _controller.StatusTextChanged += ForwardStatusTextChanged;
     }
 
     private void DetachControllerEventForwarders()
@@ -463,6 +573,7 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.CoreWebView2EnvironmentRequested -= ForwardCoreWebView2EnvironmentRequested;
         _controller.CoreWebView2ControllerOptionsRequested -= ForwardCoreWebView2ControllerOptionsRequested;
         _controller.FaviconChanged -= ForwardFaviconChanged;
+        _controller.StatusTextChanged -= ForwardStatusTextChanged;
     }
 
     private void AttachMacOSHostEventForwarders()
@@ -518,6 +629,30 @@ public class NativeWebView : NativeControlHost, IDisposable
 
     private void ForwardWebMessageReceived(object? sender, NativeWebViewMessageReceivedEventArgs e) =>
         _webMessageReceived?.Invoke(sender, e);
+
+    private void ForwardStatusTextChanged(object? sender, NativeWebViewStatusTextChangedEventArgs e)
+    {
+        _ = sender;
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            _statusTextDispatchQueue.Invalidate();
+            if (!_isDisposed)
+                _statusTextChanged?.Invoke(this, e);
+            return;
+        }
+
+        if (!_statusTextDispatchQueue.TryQueue(e, out var generation))
+            return;
+
+        Dispatcher.UIThread.Post(
+            () =>
+            {
+                var notification = _statusTextDispatchQueue.TakeLatest(generation);
+                if (!_isDisposed && notification is not null)
+                    _statusTextChanged?.Invoke(this, notification);
+            },
+            DispatcherPriority.Normal);
+    }
 
     private void ForwardOpenDevToolsRequested(object? sender, NativeWebViewOpenDevToolsRequestedEventArgs e) =>
         _openDevToolsRequested?.Invoke(sender, e);
@@ -1193,6 +1328,7 @@ public class NativeWebView : NativeControlHost, IDisposable
             return;
         }
 
+        _statusTextDispatchQueue.Invalidate();
         _isDisposed = true;
         StopFramePump();
         DisposeRenderSurfaces();

@@ -44,7 +44,11 @@ public enum NativeWebViewFeature
     Favicon = 1 << 24,
     Downloads = 1 << 25,
     /// <summary>Injects configured scripts before page scripts run.</summary>
-    DocumentStartScriptInjection = 1 << 26
+    DocumentStartScriptInjection = 1 << 26,
+    /// <summary>Reports the text normally displayed by the browser status UI, such as a hovered link target.</summary>
+    StatusText = 1 << 27,
+    /// <summary>Captures the visible viewport of an embedded native WebView as an encoded image.</summary>
+    EmbeddedSnapshotCapture = 1 << 28
 }
 
 /// <summary>Specifies which document frames receive a document-start script.</summary>

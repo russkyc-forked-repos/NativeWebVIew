@@ -22,6 +22,8 @@ public sealed class NativeWebViewController : IDisposable
     private readonly INativeWebViewBackend _backend;
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
     private readonly Lock _taskGate = new();
+    private readonly object _statusTextGate = new();
+    private readonly Queue<NativeWebViewStatusTextChangedEventArgs> _statusTextNotifications = [];
     private Task? _initializeTask;
 
     private int _state = (int)NativeWebComponentState.Created;
@@ -31,6 +33,8 @@ public sealed class NativeWebViewController : IDisposable
     private bool _canGoBack;
     private bool _canGoForward;
     private bool _hasNavigationSnapshot;
+    private string? _statusText;
+    private bool _isDispatchingStatusText;
 
     public NativeWebViewController(INativeWebViewBackend backend)
     {
@@ -105,6 +109,10 @@ public sealed class NativeWebViewController : IDisposable
 
     public string? UserAgentString => _backend.UserAgentString;
 
+    /// <summary>Gets the current browser status text, such as a hovered link target.</summary>
+    /// <remarks>Unusually long page-controlled values may be truncated.</remarks>
+    public string? StatusText => Volatile.Read(ref _statusText);
+
     public event EventHandler<CoreWebViewInitializedEventArgs>? CoreWebView2Initialized;
 
     public event EventHandler<NativeWebViewNavigationStartedEventArgs>? NavigationStarted;
@@ -149,6 +157,9 @@ public sealed class NativeWebViewController : IDisposable
     public event EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? CoreWebView2ControllerOptionsRequested;
 
     public event EventHandler<NativeWebViewFaviconChangedEventArgs>? FaviconChanged;
+
+    /// <summary>Occurs when <see cref="StatusText"/> changes.</summary>
+    public event EventHandler<NativeWebViewStatusTextChangedEventArgs>? StatusTextChanged;
 
     /// <summary>Inserts text into a short-lived target captured by a native context menu.</summary>
     public Task<bool> InsertTextAtContextMenuTargetAsync(
@@ -321,10 +332,21 @@ public sealed class NativeWebViewController : IDisposable
             return;
         }
 
-        SetState(NativeWebComponentState.Disposed);
-        DetachBackendEvents();
-
-        _backend.Dispose();
+        try
+        {
+            SetState(NativeWebComponentState.Disposed);
+        }
+        finally
+        {
+            try
+            {
+                DetachBackendEvents();
+            }
+            finally
+            {
+                _backend.Dispose();
+            }
+        }
     }
 
     private async Task EnsureInitializedCoreAsync(CancellationToken cancellationToken)
@@ -429,6 +451,13 @@ public sealed class NativeWebViewController : IDisposable
         {
             faviconProvider.FaviconChanged += OnFaviconChanged;
         }
+
+        if (_backend is INativeWebViewStatusTextProvider statusTextProvider)
+        {
+            statusTextProvider.StatusTextChanged += OnStatusTextChanged;
+            lock (_statusTextGate)
+                _statusText = NormalizeStatusText(statusTextProvider.StatusText);
+        }
     }
 
     private void DetachBackendEvents()
@@ -457,7 +486,102 @@ public sealed class NativeWebViewController : IDisposable
         {
             faviconProvider.FaviconChanged -= OnFaviconChanged;
         }
+
+        if (_backend is INativeWebViewStatusTextProvider statusTextProvider)
+        {
+            statusTextProvider.StatusTextChanged -= OnStatusTextChanged;
+        }
+
+        ClearStatusText();
     }
+
+    private void OnStatusTextChanged(object? sender, NativeWebViewStatusTextChangedEventArgs e)
+    {
+        var statusText = NormalizeStatusText(e.StatusText);
+        var shouldDispatch = false;
+        lock (_statusTextGate)
+        {
+            if (IsDisposed || string.Equals(_statusText, statusText, StringComparison.Ordinal))
+                return;
+
+            _statusText = statusText;
+            _statusTextNotifications.Enqueue(new NativeWebViewStatusTextChangedEventArgs(statusText));
+            if (!_isDispatchingStatusText)
+            {
+                _isDispatchingStatusText = true;
+                shouldDispatch = true;
+            }
+        }
+
+        if (shouldDispatch)
+            DispatchStatusTextNotifications();
+    }
+
+    private void ClearStatusText()
+    {
+        var shouldDispatch = false;
+        lock (_statusTextGate)
+        {
+            var shouldNotifyCleared = _statusText is not null || _isDispatchingStatusText;
+            _statusText = null;
+            _statusTextNotifications.Clear();
+            if (shouldNotifyCleared)
+                _statusTextNotifications.Enqueue(new NativeWebViewStatusTextChangedEventArgs(null));
+
+            if (_statusTextNotifications.Count > 0 && !_isDispatchingStatusText)
+            {
+                _isDispatchingStatusText = true;
+                shouldDispatch = true;
+            }
+        }
+
+        if (shouldDispatch)
+            DispatchStatusTextNotifications();
+    }
+
+    private void DispatchStatusTextNotifications()
+    {
+        Exception? dispatchException = null;
+        while (true)
+        {
+            NativeWebViewStatusTextChangedEventArgs? notification = null;
+            EventHandler<NativeWebViewStatusTextChangedEventArgs>? handler = null;
+            lock (_statusTextGate)
+            {
+                while (_statusTextNotifications.Count > 0)
+                {
+                    var candidate = _statusTextNotifications.Dequeue();
+                    if (!IsDisposed || candidate.StatusText is null)
+                    {
+                        notification = candidate;
+                        handler = StatusTextChanged;
+                        break;
+                    }
+                }
+
+                if (notification is null)
+                    _isDispatchingStatusText = false;
+            }
+
+            if (notification is null)
+                break;
+
+            try
+            {
+                handler?.Invoke(this, notification);
+            }
+            catch (Exception ex)
+            {
+                dispatchException ??= ex;
+            }
+        }
+
+        if (dispatchException is not null)
+            throw dispatchException;
+    }
+
+    private static string? NormalizeStatusText(string? statusText) =>
+        NativeWebViewStatusTextNormalizer.Normalize(statusText);
 
     private void OnCoreWebView2Initialized(object? sender, CoreWebViewInitializedEventArgs e)
     {

@@ -50,17 +50,21 @@ internal static class LinuxGtkDispatcher
 
         if (Environment.CurrentManagedThreadId == _gtkThreadId)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             return action();
         }
 
         var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var registration = cancellationToken.Register(static state =>
-        {
-            ((TaskCompletionSource<T>)state!).TrySetCanceled();
-        }, completion);
+        var cancellationState = new LinuxCancellationState<T>(completion, cancellationToken);
+        using var registration = cancellationToken.Register(
+            static state => ((LinuxCancellationState<T>)state!).Cancel(),
+            cancellationState);
 
         LinuxNativeInterop.EnqueueOnGtkThread(() =>
         {
+            if (!cancellationState.TryBeginExecution())
+                return;
+
             try
             {
                 completion.TrySetResult(action());
@@ -105,6 +109,141 @@ internal static class LinuxGtkDispatcher
 
         thread.Start();
         return completion.Task;
+    }
+}
+
+internal sealed class LinuxCancellationState<T>(
+    TaskCompletionSource<T> completion,
+    CancellationToken cancellationToken)
+{
+    private int _state;
+
+    public bool TryBeginExecution() =>
+        Interlocked.CompareExchange(ref _state, 1, 0) == 0;
+
+    public void Cancel()
+    {
+        if (Interlocked.CompareExchange(ref _state, 2, 0) == 0)
+            completion.TrySetCanceled(cancellationToken);
+    }
+}
+
+internal sealed class LinuxJavaScriptRequest : IDisposable
+{
+    private readonly TaskCompletionSource<string?> _completion =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly CancellationTokenRegistration _cancellationRegistration;
+    private readonly CancellationToken _cancellationToken;
+    private readonly Action<IntPtr> _cancelCancellable;
+    private readonly Action<IntPtr> _releaseCancellable;
+    private GCHandle _managedHandle;
+    private int _disposeState;
+
+    public LinuxJavaScriptRequest(CancellationToken cancellationToken)
+        : this(
+            cancellationToken,
+            CreateCancellable(cancellationToken),
+            LinuxNativeInterop.CancelCancellable,
+            LinuxNativeInterop.ReleaseCancellable)
+    {
+    }
+
+    internal LinuxJavaScriptRequest(
+        CancellationToken cancellationToken,
+        IntPtr cancellable,
+        Action<IntPtr> cancelCancellable,
+        Action<IntPtr> releaseCancellable)
+    {
+        ArgumentNullException.ThrowIfNull(cancelCancellable);
+        ArgumentNullException.ThrowIfNull(releaseCancellable);
+
+        _cancellationToken = cancellationToken;
+        Cancellable = cancellable;
+        _cancelCancellable = cancelCancellable;
+        _releaseCancellable = releaseCancellable;
+        try
+        {
+            if (cancellationToken.CanBeCanceled)
+            {
+                _cancellationRegistration = cancellationToken.Register(
+                    static state => ((LinuxJavaScriptRequest)state!).Cancel(),
+                    this);
+            }
+
+            _managedHandle = GCHandle.Alloc(this);
+        }
+        catch
+        {
+            _cancellationRegistration.Dispose();
+            ReleaseCancellable();
+            throw;
+        }
+    }
+
+    public Task<string?> Completion => _completion.Task;
+
+    public IntPtr Cancellable { get; }
+
+    public IntPtr UserData
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposeState) != 0, this);
+            return GCHandle.ToIntPtr(_managedHandle);
+        }
+    }
+
+    internal bool IsDisposed => Volatile.Read(ref _disposeState) != 0;
+
+    public void TrySetResult(string? result) => _completion.TrySetResult(result);
+
+    public void TrySetException(Exception exception) => _completion.TrySetException(exception);
+
+    private static IntPtr CreateCancellable(CancellationToken cancellationToken)
+    {
+        if (!cancellationToken.CanBeCanceled || !OperatingSystem.IsLinux())
+            return IntPtr.Zero;
+
+        var cancellable = LinuxNativeInterop.CreateCancellable();
+        return cancellable != IntPtr.Zero
+            ? cancellable
+            : throw new InvalidOperationException("Unable to create a cancellable WebKit operation.");
+    }
+
+    private void Cancel()
+    {
+        try
+        {
+            if (Cancellable != IntPtr.Zero)
+                _cancelCancellable(Cancellable);
+        }
+        finally
+        {
+            _completion.TrySetCanceled(_cancellationToken);
+        }
+    }
+
+    private void ReleaseCancellable()
+    {
+        if (Cancellable != IntPtr.Zero)
+            _releaseCancellable(Cancellable);
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
+            return;
+
+        try
+        {
+            _cancellationRegistration.Dispose();
+            ReleaseCancellable();
+        }
+        finally
+        {
+            if (_managedHandle.IsAllocated)
+                _managedHandle.Free();
+        }
     }
 }
 
@@ -157,6 +296,7 @@ internal static class LinuxNativeInterop
     private const string WebKitName = "libwebkit2gtk-4.1.so.0";
     private const string JavaScriptCoreName = "libjavascriptcoregtk-4.1.so.0";
     private const string X11Name = "libX11.so.6";
+    private const string CairoName = "libcairo.so.2";
 
     private static readonly object GtkInitializationGate = new();
     private static IntPtr _display;
@@ -277,7 +417,19 @@ internal static class LinuxNativeInterop
     internal delegate void DownloadFinishedSignal(IntPtr download, IntPtr userData);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void MouseTargetChangedSignal(IntPtr webView, IntPtr hitTestResult, uint modifiers, IntPtr userData);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void JavaScriptFinishedCallback(IntPtr webView, IntPtr asyncResult, IntPtr userData);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate void SnapshotFinishedCallback(IntPtr webView, IntPtr asyncResult, IntPtr userData);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int CairoWriteCallback(IntPtr closure, IntPtr data, uint length);
+
+    private static readonly SnapshotFinishedCallback SnapshotFinished = OnSnapshotFinished;
+    private static readonly CairoWriteCallback CairoWrite = WriteCairoPngData;
 
     private sealed class ConnectedSignal : IDisposable
     {
@@ -302,37 +454,22 @@ internal static class LinuxNativeInterop
             }
 
             _disposed = true;
-            g_signal_handler_disconnect(_instance, _signalId);
-            g_object_unref(_instance);
-
-            if (_delegateHandle.IsAllocated)
+            try
             {
-                _delegateHandle.Free();
+                g_signal_handler_disconnect(_instance, _signalId);
             }
-        }
-    }
-
-    private sealed class JavaScriptRequest : IDisposable
-    {
-        private readonly CancellationTokenRegistration _cancellationRegistration;
-
-        public JavaScriptRequest(TaskCompletionSource<string?> completion, CancellationToken cancellationToken)
-        {
-            Completion = completion;
-            if (cancellationToken.CanBeCanceled)
+            finally
             {
-                _cancellationRegistration = cancellationToken.Register(static state =>
+                try
                 {
-                    ((TaskCompletionSource<string?>)state!).TrySetCanceled();
-                }, completion);
+                    g_object_unref(_instance);
+                }
+                finally
+                {
+                    if (_delegateHandle.IsAllocated)
+                        _delegateHandle.Free();
+                }
             }
-        }
-
-        public TaskCompletionSource<string?> Completion { get; }
-
-        public void Dispose()
-        {
-            _cancellationRegistration.Dispose();
         }
     }
 
@@ -437,6 +574,18 @@ internal static class LinuxNativeInterop
     [DllImport(GObjectName)]
     internal static extern void g_object_unref(IntPtr instance);
 
+    [DllImport(GioName)]
+    private static extern IntPtr g_cancellable_new();
+
+    [DllImport(GioName)]
+    private static extern void g_cancellable_cancel(IntPtr cancellable);
+
+    internal static IntPtr CreateCancellable() => g_cancellable_new();
+
+    internal static void CancelCancellable(IntPtr cancellable) => g_cancellable_cancel(cancellable);
+
+    internal static void ReleaseCancellable(IntPtr cancellable) => g_object_unref(cancellable);
+
     [DllImport(WebKitName)]
     internal static extern IntPtr webkit_web_context_new();
 
@@ -496,6 +645,33 @@ internal static class LinuxNativeInterop
 
     [DllImport(WebKitName)]
     internal static extern bool webkit_hit_test_result_context_is_editable(IntPtr hitTestResult);
+
+    [DllImport(WebKitName)]
+    internal static extern bool webkit_hit_test_result_context_is_link(IntPtr hitTestResult);
+
+    [DllImport(WebKitName)]
+    internal static extern IntPtr webkit_hit_test_result_get_link_uri(IntPtr hitTestResult);
+
+    [DllImport(WebKitName)]
+    private static extern void webkit_web_view_get_snapshot(
+        IntPtr webView,
+        int region,
+        int options,
+        IntPtr cancellable,
+        SnapshotFinishedCallback callback,
+        IntPtr userData);
+
+    [DllImport(WebKitName)]
+    private static extern IntPtr webkit_web_view_get_snapshot_finish(IntPtr webView, IntPtr asyncResult, out IntPtr error);
+
+    [DllImport(CairoName)]
+    private static extern int cairo_surface_write_to_png_stream(
+        IntPtr surface,
+        CairoWriteCallback writeFunction,
+        IntPtr closure);
+
+    [DllImport(CairoName)]
+    private static extern void cairo_surface_destroy(IntPtr surface);
 
     [DllImport(WebKitName)]
     internal static extern IntPtr webkit_context_menu_new();
@@ -709,10 +885,28 @@ internal static class LinuxNativeInterop
 
     public static void EnqueueOnGtkThread(Action action)
     {
+        EnqueueOnGtkThread(
+            action,
+            static callbackHandle => g_idle_add_full(0, IdleSourceCallback, callbackHandle, null));
+    }
+
+    internal static void EnqueueOnGtkThread(Action action, Func<IntPtr, uint> registerIdleSource)
+    {
         ArgumentNullException.ThrowIfNull(action);
+        ArgumentNullException.ThrowIfNull(registerIdleSource);
         var handle = GCHandle.Alloc(action);
-        var callbackHandle = GCHandle.ToIntPtr(handle);
-        _ = g_idle_add_full(0, IdleSourceCallback, callbackHandle, null);
+        try
+        {
+            var callbackHandle = GCHandle.ToIntPtr(handle);
+            if (registerIdleSource(callbackHandle) == 0)
+                throw new InvalidOperationException("Unable to enqueue work on the GTK thread.");
+        }
+        catch
+        {
+            if (handle.IsAllocated)
+                handle.Free();
+            throw;
+        }
     }
 
     public static void AttachX11WindowToParent(IntPtr childWindow, IntPtr parentWindow)
@@ -752,16 +946,171 @@ internal static class LinuxNativeInterop
         ArgumentNullException.ThrowIfNull(handler);
 
         var delegateHandle = GCHandle.Alloc(handler);
-        var functionPointer = Marshal.GetFunctionPointerForDelegate(handler);
-        var signalId = g_signal_connect_data(instance, signalName, functionPointer, IntPtr.Zero, IntPtr.Zero, 0);
-
-        if (signalId == 0)
+        ulong signalId = 0;
+        try
         {
-            delegateHandle.Free();
-            throw new InvalidOperationException($"Unable to connect GTK signal '{signalName}'.");
+            var functionPointer = Marshal.GetFunctionPointerForDelegate(handler);
+            signalId = g_signal_connect_data(instance, signalName, functionPointer, IntPtr.Zero, IntPtr.Zero, 0);
+
+            if (signalId == 0)
+                throw new InvalidOperationException($"Unable to connect GTK signal '{signalName}'.");
+
+            return new ConnectedSignal(instance, delegateHandle, signalId);
+        }
+        catch
+        {
+            if (signalId != 0)
+            {
+                try
+                {
+                    g_signal_handler_disconnect(instance, signalId);
+                }
+                catch
+                {
+                    // Preserve the original signal-registration failure.
+                }
+            }
+
+            if (delegateHandle.IsAllocated)
+                delegateHandle.Free();
+            throw;
+        }
+    }
+
+    public static Task<byte[]?> CaptureSnapshotPngAsync(IntPtr webView, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (webView == IntPtr.Zero)
+            return Task.FromResult<byte[]?>(null);
+
+        var state = new SnapshotCaptureState(cancellationToken);
+        var handle = GCHandle.Alloc(state);
+        state.SetHandle(handle);
+        try
+        {
+            webkit_web_view_get_snapshot(
+                webView,
+                region: 0,
+                options: 0,
+                state.Cancellable,
+                SnapshotFinished,
+                GCHandle.ToIntPtr(handle));
+            return state.Task;
+        }
+        catch
+        {
+            state.Dispose();
+            throw;
+        }
+    }
+
+    private static void OnSnapshotFinished(IntPtr webView, IntPtr asyncResult, IntPtr userData)
+    {
+        var handle = GCHandle.FromIntPtr(userData);
+        var state = (SnapshotCaptureState)handle.Target!;
+        IntPtr surface = IntPtr.Zero;
+        try
+        {
+            surface = webkit_web_view_get_snapshot_finish(webView, asyncResult, out var error);
+            if (error != IntPtr.Zero)
+            {
+                g_error_free(error);
+                state.TrySetResult(null);
+                return;
+            }
+
+            if (surface == IntPtr.Zero)
+            {
+                state.TrySetResult(null);
+                return;
+            }
+
+            using var stream = new MemoryStream();
+            var streamHandle = GCHandle.Alloc(stream);
+            try
+            {
+                var status = cairo_surface_write_to_png_stream(surface, CairoWrite, GCHandle.ToIntPtr(streamHandle));
+                state.TrySetResult(status == 0 && stream.Length > 0 ? stream.ToArray() : null);
+            }
+            finally
+            {
+                streamHandle.Free();
+            }
+        }
+        catch (Exception exception)
+        {
+            state.TrySetException(exception);
+        }
+        finally
+        {
+            if (surface != IntPtr.Zero)
+                cairo_surface_destroy(surface);
+            state.Dispose();
+        }
+    }
+
+    private static int WriteCairoPngData(IntPtr closure, IntPtr data, uint length)
+    {
+        try
+        {
+            var stream = (MemoryStream)GCHandle.FromIntPtr(closure).Target!;
+            var buffer = new byte[checked((int)length)];
+            Marshal.Copy(data, buffer, 0, buffer.Length);
+            stream.Write(buffer, 0, buffer.Length);
+            return 0;
+        }
+        catch
+        {
+            return 11;
+        }
+    }
+
+    private sealed class SnapshotCaptureState : IDisposable
+    {
+        private readonly TaskCompletionSource<byte[]?> _completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly CancellationToken _cancellationToken;
+        private readonly CancellationTokenRegistration _cancellationRegistration;
+        private GCHandle _selfHandle;
+        private int _disposed;
+
+        public SnapshotCaptureState(CancellationToken cancellationToken)
+        {
+            _cancellationToken = cancellationToken;
+            Cancellable = g_cancellable_new();
+            _cancellationRegistration = cancellationToken.Register(
+                static state => ((SnapshotCaptureState)state!).Cancel(),
+                this);
         }
 
-        return new ConnectedSignal(instance, delegateHandle, signalId);
+        public IntPtr Cancellable { get; }
+
+        public Task<byte[]?> Task => _completion.Task;
+
+        public void SetHandle(GCHandle handle) => _selfHandle = handle;
+
+        public void TrySetResult(byte[]? data) => _completion.TrySetResult(data);
+
+        public void TrySetException(Exception exception) => _completion.TrySetException(exception);
+
+        private void Cancel()
+        {
+            if (Cancellable != IntPtr.Zero)
+                g_cancellable_cancel(Cancellable);
+            _completion.TrySetCanceled(_cancellationToken);
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+
+            _cancellationRegistration.Dispose();
+            if (Cancellable != IntPtr.Zero)
+                g_object_unref(Cancellable);
+            if (_selfHandle.IsAllocated)
+                _selfHandle.Free();
+        }
     }
 
     public static async Task<string?> RunJavaScriptAsync(IntPtr webView, string script, CancellationToken cancellationToken = default)
@@ -769,25 +1118,25 @@ internal static class LinuxNativeInterop
         ArgumentException.ThrowIfNullOrWhiteSpace(script);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var completion = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var request = new JavaScriptRequest(completion, cancellationToken);
-        var handle = GCHandle.Alloc(request);
+        var request = new LinuxJavaScriptRequest(cancellationToken);
 
         try
         {
-            webkit_web_view_run_javascript(webView, script, IntPtr.Zero, OnJavaScriptFinished, GCHandle.ToIntPtr(handle));
-            return await completion.Task.ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            webkit_web_view_run_javascript(
+                webView,
+                script,
+                request.Cancellable,
+                OnJavaScriptFinished,
+                request.UserData);
         }
         catch
         {
             request.Dispose();
-            if (handle.IsAllocated)
-            {
-                handle.Free();
-            }
-
             throw;
         }
+
+        return await request.Completion.ConfigureAwait(false);
     }
 
     public static string? ConvertJavaScriptResultToJson(IntPtr javascriptResult)
@@ -845,6 +1194,18 @@ internal static class LinuxNativeInterop
             : Marshal.PtrToStringUTF8(pointer);
     }
 
+    public static string? ConvertUtf8Pointer(IntPtr pointer, int maximumByteCount)
+    {
+        if (pointer == IntPtr.Zero)
+            return null;
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumByteCount);
+
+        var length = 0;
+        while (length < maximumByteCount && Marshal.ReadByte(pointer, length) != 0)
+            length++;
+        return Marshal.PtrToStringUTF8(pointer, length);
+    }
+
     public static string GetErrorMessageAndFree(IntPtr error)
     {
         if (error == IntPtr.Zero)
@@ -866,23 +1227,22 @@ internal static class LinuxNativeInterop
     private static void OnJavaScriptFinished(IntPtr webView, IntPtr asyncResult, IntPtr userData)
     {
         var handle = GCHandle.FromIntPtr(userData);
+        var request = (LinuxJavaScriptRequest)handle.Target!;
 
         try
         {
-            var request = (JavaScriptRequest)handle.Target!;
-
             try
             {
                 var jsResult = webkit_web_view_run_javascript_finish(webView, asyncResult, out var error);
                 if (error != IntPtr.Zero)
                 {
-                    request.Completion.TrySetException(new InvalidOperationException(GetErrorMessageAndFree(error)));
+                    request.TrySetException(new InvalidOperationException(GetErrorMessageAndFree(error)));
                     return;
                 }
 
                 try
                 {
-                    request.Completion.TrySetResult(ConvertJavaScriptResultToJson(jsResult));
+                    request.TrySetResult(ConvertJavaScriptResultToJson(jsResult));
                 }
                 finally
                 {
@@ -894,16 +1254,12 @@ internal static class LinuxNativeInterop
             }
             catch (Exception ex)
             {
-                request.Completion.TrySetException(ex);
-            }
-            finally
-            {
-                request.Dispose();
+                request.TrySetException(ex);
             }
         }
         finally
         {
-            handle.Free();
+            request.Dispose();
         }
     }
 }

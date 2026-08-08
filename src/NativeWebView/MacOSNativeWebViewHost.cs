@@ -91,6 +91,7 @@ internal static class MacOSNativeWebViewHostTestHooks
 
 internal sealed class MacOSNativeWebViewHost : IDisposable
 {
+    private const string JavaScriptExceptionMessageErrorKey = "WKJavaScriptExceptionMessage";
     private const string DownloadTracePrefix = "NativeWebView.macOS.download";
     private const string NativeTracePrefix = "NativeWebView.macOS.native";
     internal const string ConstructionCleanupExceptionsDataKey = "NativeWebView.macOS.ConstructionCleanupExceptions";
@@ -119,6 +120,8 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     {
         public static readonly IntPtr NSArrayClass = ObjC.GetClass("NSArray");
         public static readonly IntPtr NSDataClass = ObjC.GetClass("NSData");
+        public static readonly IntPtr NSDictionaryClass = ObjC.GetClass("NSDictionary");
+        public static readonly IntPtr NSBitmapImageRepClass = ObjC.GetClass("NSBitmapImageRep");
         public static readonly IntPtr NSImageClass = ObjC.GetClass("NSImage");
         public static readonly IntPtr NSUUIDClass = ObjC.GetClass("NSUUID");
         public static readonly IntPtr NSStringClass = ObjC.GetClass("NSString");
@@ -141,6 +144,12 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static readonly IntPtr SelRelease = ObjC.GetSelector("release");
         public static readonly IntPtr SelArrayWithObject = ObjC.GetSelector("arrayWithObject:");
         public static readonly IntPtr SelDataWithBytesLength = ObjC.GetSelector("dataWithBytes:length:");
+        public static readonly IntPtr SelBytes = ObjC.GetSelector("bytes");
+        public static readonly IntPtr SelLength = ObjC.GetSelector("length");
+        public static readonly IntPtr SelDictionary = ObjC.GetSelector("dictionary");
+        public static readonly IntPtr SelImageRepWithData = ObjC.GetSelector("imageRepWithData:");
+        public static readonly IntPtr SelRepresentationUsingTypeProperties = ObjC.GetSelector("representationUsingType:properties:");
+        public static readonly IntPtr SelTiffRepresentation = ObjC.GetSelector("TIFFRepresentation");
         public static readonly IntPtr SelInitWithData = ObjC.GetSelector("initWithData:");
         public static readonly IntPtr SelRemoveFromSuperview = ObjC.GetSelector("removeFromSuperview");
         public static readonly IntPtr SelAddSubview = ObjC.GetSelector("addSubview:");
@@ -162,6 +171,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static readonly IntPtr SelRemoveScriptMessageHandlerForName = ObjC.GetSelector("removeScriptMessageHandlerForName:");
         public static readonly IntPtr SelInitWithSourceInjectionTimeForMainFrameOnly = ObjC.GetSelector("initWithSource:injectionTime:forMainFrameOnly:");
         public static readonly IntPtr SelEvaluateJavaScriptCompletionHandler = ObjC.GetSelector("evaluateJavaScript:completionHandler:");
+        public static readonly IntPtr SelTakeSnapshotWithConfigurationCompletionHandler = ObjC.GetSelector("takeSnapshotWithConfiguration:completionHandler:");
         public static readonly IntPtr SelName = ObjC.GetSelector("name");
         public static readonly IntPtr SelDataWithJsonObjectOptionsError = ObjC.GetSelector("dataWithJSONObject:options:error:");
         public static readonly IntPtr SelInitWithDataEncoding = ObjC.GetSelector("initWithData:encoding:");
@@ -218,6 +228,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static readonly IntPtr SelTotalUnitCount = ObjC.GetSelector("totalUnitCount");
         public static readonly IntPtr SelCancel = ObjC.GetSelector("cancel:");
         public static readonly IntPtr SelLocalizedDescription = ObjC.GetSelector("localizedDescription");
+        public static readonly IntPtr SelUserInfo = ObjC.GetSelector("userInfo");
         public static readonly IntPtr SelCode = ObjC.GetSelector("code");
         public static readonly IntPtr SelSharedApplication = ObjC.GetSelector("sharedApplication");
         public static readonly IntPtr SelTerminate = ObjC.GetSelector("terminate:");
@@ -245,6 +256,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private readonly Dictionary<IntPtr, DownloadContext> _downloads = [];
     private readonly HashSet<ManagedDownloadContext> _managedDownloads = [];
     private bool _disposed;
+    private int _disposeState;
     private NativeWebViewRenderMode _renderMode = NativeWebViewRenderMode.Embedded;
     private bool _compositedPassthroughEnabled;
     private int _capturePixelWidth = 1;
@@ -258,7 +270,9 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private readonly Dictionary<IntPtr, StartDownloadBlockContext> _pendingStartDownloadBlocks = [];
     private readonly Dictionary<IntPtr, ScriptEvaluationContext> _pendingScriptEvaluationBlocks = [];
     private readonly Dictionary<IntPtr, (string CommandId, NativeWebViewContextMenuTarget Target)> _contextMenuCommands = [];
+    private readonly PendingNativeOperationRegistry<SnapshotCaptureContext> _pendingSnapshotCaptures = new();
     private long _captureFrameSequence;
+    private int _snapshotGeneration;
     private GCHandle _managedHandle;
     private IntPtr _navigationDelegateHandle;
     private IntPtr _userContentControllerHandle;
@@ -757,12 +771,14 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
     public void Dispose()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
         {
             return;
         }
 
         _disposed = true;
+        Interlocked.Increment(ref _snapshotGeneration);
+        CompletePendingSnapshotCaptures();
         try
         {
             var cleanupResult = CreateCleanupCoordinator().Rollback();
@@ -1039,6 +1055,177 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             .ConfigureAwait(false);
     }
 
+    public NativeWebViewSnapshotCapture BeginCaptureSnapshot(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (Dispatcher.UIThread.CheckAccess())
+        {
+            return new NativeWebViewSnapshotCapture(
+                Task.CompletedTask,
+                CaptureSnapshotOnUiThreadAsync(cancellationToken));
+        }
+
+        var captureStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completion = CaptureSnapshotAfterDispatchAsync(captureStarted, cancellationToken);
+        return new NativeWebViewSnapshotCapture(captureStarted.Task, completion);
+    }
+
+    public Task<NativeWebViewSnapshot?> CaptureSnapshotAsync(CancellationToken cancellationToken) =>
+        BeginCaptureSnapshot(cancellationToken).Completion;
+
+    private async Task<NativeWebViewSnapshot?> CaptureSnapshotAfterDispatchAsync(
+        TaskCompletionSource captureStarted,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await Dispatcher.UIThread
+                .InvokeAsync(() =>
+                {
+                    var pendingCapture = CaptureSnapshotOnUiThreadAsync(cancellationToken);
+                    captureStarted.TrySetResult();
+                    return pendingCapture;
+                })
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            captureStarted.TrySetResult();
+        }
+    }
+
+    private Task<NativeWebViewSnapshot?> CaptureSnapshotOnUiThreadAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (ViewHandle == IntPtr.Zero ||
+            !ObjC.SendBoolIntPtr(
+                ViewHandle,
+                NativeSymbols.SelRespondsToSelector,
+                NativeSymbols.SelTakeSnapshotWithConfigurationCompletionHandler))
+        {
+            return Task.FromResult<NativeWebViewSnapshot?>(null);
+        }
+
+        var context = new SnapshotCaptureContext(this, Volatile.Read(ref _snapshotGeneration), cancellationToken);
+        IntPtr block = IntPtr.Zero;
+        try
+        {
+            context.ManagedHandle = GCHandle.Alloc(context);
+            block = SnapshotBlockBridge.Create(context.ManagedHandle);
+            if (block == IntPtr.Zero)
+                throw new InvalidOperationException("WKWebView did not create a snapshot completion block.");
+            if (!TrackSnapshotCapture(context))
+            {
+                context.Completion.TrySetResult(null);
+                return context.Completion.Task;
+            }
+
+            context.CancellationRegistration = cancellationToken.Register(
+                static state =>
+                {
+                    var capture = (SnapshotCaptureContext)state!;
+                    capture.Completion.TrySetCanceled(capture.CancellationToken);
+                },
+                context);
+
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                ObjC.SendVoidIntPtrIntPtr(
+                    ViewHandle,
+                    NativeSymbols.SelTakeSnapshotWithConfigurationCompletionHandler,
+                    IntPtr.Zero,
+                    block);
+            }
+
+            return context.Completion.Task;
+        }
+        catch
+        {
+            if (block == IntPtr.Zero)
+                context.DisposeManagedState();
+            else
+                context.Completion.TrySetResult(null);
+            throw;
+        }
+        finally
+        {
+            SnapshotBlockBridge.Release(block);
+        }
+    }
+
+    private void SnapshotCaptureCompleted(SnapshotCaptureContext context, IntPtr image, IntPtr error)
+    {
+        try
+        {
+            if (_disposed ||
+                context.Generation != Volatile.Read(ref _snapshotGeneration) ||
+                error != IntPtr.Zero ||
+                image == IntPtr.Zero)
+            {
+                context.Completion.TrySetResult(null);
+                return;
+            }
+
+            context.Completion.TrySetResult(TryCreateSnapshot(image));
+        }
+        catch
+        {
+            context.Completion.TrySetResult(null);
+        }
+    }
+
+    private bool TrackSnapshotCapture(SnapshotCaptureContext context)
+    {
+        return _pendingSnapshotCaptures.TryAdd(context);
+    }
+
+    private void SnapshotCaptureReleased(SnapshotCaptureContext context)
+    {
+        _pendingSnapshotCaptures.Remove(context);
+    }
+
+    private void CompletePendingSnapshotCaptures()
+    {
+        foreach (var capture in _pendingSnapshotCaptures.CloseAndSnapshot())
+            capture.CompleteForOwnerDisposal();
+    }
+
+    private static NativeWebViewSnapshot? TryCreateSnapshot(IntPtr image)
+    {
+        var tiffData = ObjC.SendIntPtr(image, NativeSymbols.SelTiffRepresentation);
+        if (tiffData == IntPtr.Zero)
+            return null;
+
+        var bitmap = ObjC.SendIntPtrIntPtr(
+            NativeSymbols.NSBitmapImageRepClass,
+            NativeSymbols.SelImageRepWithData,
+            tiffData);
+        if (bitmap == IntPtr.Zero)
+            return null;
+
+        var properties = ObjC.SendIntPtr(NativeSymbols.NSDictionaryClass, NativeSymbols.SelDictionary);
+        var pngData = ObjC.SendIntPtrNUIntIntPtr(
+            bitmap,
+            NativeSymbols.SelRepresentationUsingTypeProperties,
+            4,
+            properties);
+        if (pngData == IntPtr.Zero)
+            return null;
+
+        var length = ObjC.SendNUInt(pngData, NativeSymbols.SelLength);
+        var bytes = ObjC.SendIntPtr(pngData, NativeSymbols.SelBytes);
+        if (length == 0 || length > int.MaxValue || bytes == IntPtr.Zero)
+            return null;
+
+        var managedBytes = new byte[(int)length];
+        Marshal.Copy(bytes, managedBytes, 0, managedBytes.Length);
+        return new NativeWebViewSnapshot(managedBytes);
+    }
+
     private void RouteScriptMessageFromNative(string? name, ScriptMessageBody body)
     {
         DispatchScriptMessage(
@@ -1258,7 +1445,8 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         {
             if (error != IntPtr.Zero)
             {
-                var message = ResolveErrorMessage(error) ?? "WKWebView JavaScript evaluation failed.";
+                var message = ResolveJavaScriptEvaluationErrorMessage(error) ??
+                              "WKWebView JavaScript evaluation failed.";
                 context.Completion.TrySetException(new InvalidOperationException(message));
             }
             else
@@ -2696,6 +2884,50 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             : ObjC.StringFromNSString(ObjC.SendIntPtr(error, NativeSymbols.SelLocalizedDescription));
     }
 
+    private static string? ResolveJavaScriptEvaluationErrorMessage(IntPtr error)
+    {
+        var localizedDescription = ResolveErrorMessage(error);
+        if (error == IntPtr.Zero)
+            return localizedDescription;
+
+        try
+        {
+            var userInfo = ObjC.SendIntPtr(error, NativeSymbols.SelUserInfo);
+            var exceptionMessage = userInfo == IntPtr.Zero
+                ? null
+                : ObjC.StringFromNSString(
+                    ObjC.SendIntPtrIntPtr(
+                        userInfo,
+                        NativeSymbols.SelObjectForKey,
+                        CreateNSString(JavaScriptExceptionMessageErrorKey)));
+            return CombineJavaScriptEvaluationErrorMessage(localizedDescription, exceptionMessage);
+        }
+        catch
+        {
+            // The JavaScript exception key is WebKit-specific. Preserve NSError's standard
+            // localized description if it is unavailable on a particular runtime.
+            return localizedDescription;
+        }
+    }
+
+    internal static string? CombineJavaScriptEvaluationErrorMessage(
+        string? localizedDescription,
+        string? exceptionMessage)
+    {
+        var description = string.IsNullOrWhiteSpace(localizedDescription)
+            ? null
+            : localizedDescription.Trim();
+        var detail = string.IsNullOrWhiteSpace(exceptionMessage)
+            ? null
+            : exceptionMessage.Trim();
+
+        if (description is null)
+            return detail;
+        if (detail is null || description.Contains(detail, StringComparison.OrdinalIgnoreCase))
+            return description;
+        return $"{description}: {detail}";
+    }
+
     private static string? ResolveErrorCode(IntPtr error)
     {
         return error == IntPtr.Zero
@@ -3310,6 +3542,64 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             if (Interlocked.Exchange(ref _handleReleaseState, 1) != 0)
                 return;
 
+            if (ManagedHandle.IsAllocated)
+                ManagedHandle.Free();
+        }
+    }
+
+    private sealed class SnapshotCaptureContext
+    {
+        private int _managedStateDisposed;
+        private int _nativeOwnershipCount;
+
+        public SnapshotCaptureContext(
+            MacOSNativeWebViewHost owner,
+            int generation,
+            CancellationToken cancellationToken)
+        {
+            Owner = owner;
+            Generation = generation;
+            CancellationToken = cancellationToken;
+            Completion = new TaskCompletionSource<NativeWebViewSnapshot?>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        public MacOSNativeWebViewHost Owner { get; }
+
+        public int Generation { get; }
+
+        public CancellationToken CancellationToken { get; }
+
+        public TaskCompletionSource<NativeWebViewSnapshot?> Completion { get; }
+
+        public CancellationTokenRegistration CancellationRegistration { get; set; }
+
+        public GCHandle ManagedHandle { get; set; }
+
+        public void AddNativeOwnership() => Interlocked.Increment(ref _nativeOwnershipCount);
+
+        public void ReleaseNativeOwnership()
+        {
+            if (Interlocked.Decrement(ref _nativeOwnershipCount) != 0)
+                return;
+
+            Owner.SnapshotCaptureReleased(this);
+            Completion.TrySetResult(null);
+            DisposeManagedState();
+        }
+
+        public void CompleteForOwnerDisposal()
+        {
+            Completion.TrySetResult(null);
+            CancellationRegistration.Dispose();
+        }
+
+        public void DisposeManagedState()
+        {
+            if (Interlocked.Exchange(ref _managedStateDisposed, 1) != 0)
+                return;
+
+            CancellationRegistration.Dispose();
             if (ManagedHandle.IsAllocated)
                 ManagedHandle.Free();
         }
@@ -4969,6 +5259,141 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         private delegate void DownloadContextCompletionDelegate(IntPtr block, IntPtr value);
     }
 
+    private static class SnapshotBlockBridge
+    {
+        private const int BlockHasCopyDispose = 1 << 25;
+        private const int BlockHasSignature = 1 << 30;
+        private static readonly CompletionDelegate CompletionCallback = Complete;
+        private static readonly CopyDelegate CopyCallback = Copy;
+        private static readonly DisposeDelegate DisposeCallback = Dispose;
+        private static readonly Lazy<IntPtr> Descriptor = new(CreateDescriptor);
+
+        public static IntPtr Create(GCHandle contextHandle)
+        {
+            var concreteBlockClass = Blocks.GetConcreteStackBlockClass();
+            if (concreteBlockClass == IntPtr.Zero)
+                return IntPtr.Zero;
+
+            var literal = new SnapshotBlockLiteral
+            {
+                Isa = concreteBlockClass,
+                Flags = BlockHasCopyDispose | BlockHasSignature,
+                Invoke = Marshal.GetFunctionPointerForDelegate(CompletionCallback),
+                Descriptor = Descriptor.Value,
+                ContextHandle = GCHandle.ToIntPtr(contextHandle),
+            };
+
+            var stackBlock = Marshal.AllocHGlobal(Marshal.SizeOf<SnapshotBlockLiteral>());
+            try
+            {
+                Marshal.StructureToPtr(literal, stackBlock, fDeleteOld: false);
+                return Blocks.Block_copy(stackBlock);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(stackBlock);
+            }
+        }
+
+        public static void Release(IntPtr block)
+        {
+            if (block != IntPtr.Zero)
+                Blocks.Block_release(block);
+        }
+
+        private static void Complete(IntPtr block, IntPtr image, IntPtr error)
+        {
+            try
+            {
+                if (TryGetContext(block) is { } context)
+                    context.Owner.SnapshotCaptureCompleted(context, image, error);
+            }
+            catch
+            {
+                // Exceptions must never cross an Objective-C block ABI callback.
+            }
+        }
+
+        private static void Copy(IntPtr destination, IntPtr source)
+        {
+            _ = source;
+            try
+            {
+                TryGetContext(destination)?.AddNativeOwnership();
+            }
+            catch
+            {
+                // Exceptions must never cross an Objective-C block ABI callback.
+            }
+        }
+
+        private static void Dispose(IntPtr block)
+        {
+            try
+            {
+                TryGetContext(block)?.ReleaseNativeOwnership();
+            }
+            catch
+            {
+                // Exceptions must never cross an Objective-C block ABI callback.
+            }
+        }
+
+        private static SnapshotCaptureContext? TryGetContext(IntPtr block)
+        {
+            var literal = Marshal.PtrToStructure<SnapshotBlockLiteral>(block);
+            if (literal.ContextHandle == IntPtr.Zero)
+                return null;
+
+            return GCHandle.FromIntPtr(literal.ContextHandle).Target as SnapshotCaptureContext;
+        }
+
+        private static IntPtr CreateDescriptor()
+        {
+            var descriptor = new BlockDescriptor
+            {
+                Size = (UIntPtr)Marshal.SizeOf<SnapshotBlockLiteral>(),
+                CopyHelper = Marshal.GetFunctionPointerForDelegate(CopyCallback),
+                DisposeHelper = Marshal.GetFunctionPointerForDelegate(DisposeCallback),
+                Signature = Marshal.StringToHGlobalAnsi("v@?@@"),
+            };
+
+            var handle = Marshal.AllocHGlobal(Marshal.SizeOf<BlockDescriptor>());
+            Marshal.StructureToPtr(descriptor, handle, fDeleteOld: false);
+            return handle;
+        }
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void CompletionDelegate(IntPtr block, IntPtr image, IntPtr error);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void CopyDelegate(IntPtr destination, IntPtr source);
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate void DisposeDelegate(IntPtr block);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct SnapshotBlockLiteral
+        {
+            public IntPtr Isa;
+            public int Flags;
+            public int Reserved;
+            public IntPtr Invoke;
+            public IntPtr Descriptor;
+            public IntPtr ContextHandle;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BlockDescriptor
+        {
+            public UIntPtr Reserved;
+            public UIntPtr Size;
+            public IntPtr CopyHelper;
+            public IntPtr DisposeHelper;
+            public IntPtr Signature;
+        }
+    }
+
     private static class ObjC
     {
         private const int RtldNow = 2;
@@ -5022,6 +5447,13 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
         [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSend")]
         private static extern IntPtr objc_msgSend_IntPtr_IntPtr_NUInt(IntPtr receiver, IntPtr selector, IntPtr arg1, nuint arg2);
+
+        [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSend")]
+        private static extern IntPtr objc_msgSend_IntPtr_NUInt_IntPtr(
+            IntPtr receiver,
+            IntPtr selector,
+            nuint arg1,
+            IntPtr arg2);
 
         [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSend")]
         private static extern IntPtr objc_msgSend_IntPtr_IntPtr_NUInt_IntPtr(
@@ -5164,6 +5596,15 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static IntPtr SendIntPtrIntPtrNUInt(IntPtr receiver, IntPtr selector, IntPtr arg1, nuint arg2)
         {
             return objc_msgSend_IntPtr_IntPtr_NUInt(receiver, selector, arg1, arg2);
+        }
+
+        public static IntPtr SendIntPtrNUIntIntPtr(
+            IntPtr receiver,
+            IntPtr selector,
+            nuint arg1,
+            IntPtr arg2)
+        {
+            return objc_msgSend_IntPtr_NUInt_IntPtr(receiver, selector, arg1, arg2);
         }
 
         public static IntPtr SendIntPtrIntPtrNUIntIntPtr(

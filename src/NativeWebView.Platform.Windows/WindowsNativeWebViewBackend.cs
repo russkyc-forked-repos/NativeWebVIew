@@ -17,6 +17,8 @@ public sealed class WindowsNativeWebViewBackend
       INativeWebViewInstanceConfigurationTarget,
       INativeWebViewNativeControlAttachment,
       INativeWebViewFaviconProvider,
+      INativeWebViewSnapshotProvider,
+      INativeWebViewStatusTextProvider,
       INativeWebViewContextMenuBackend
 {
     private const string ContextMenuCaptureScript = """
@@ -59,6 +61,7 @@ public sealed class WindowsNativeWebViewBackend
     private readonly INativeWebViewCookieManager _cookieManager = NativeWebViewBackendSupport.NoopCookieManagerInstance;
     private readonly NativeWebViewDownloadManager _downloadManager;
     private readonly HashSet<CoreWebView2Frame> _frames = [];
+    private readonly RuntimeNavigationReplayState _navigationReplayState = new();
     private readonly ContextMenuIconStreamStore _contextMenuIconStreams = new();
     private readonly List<NativeWebViewContextMenuItem> _cachedContextMenuDescriptors = [];
     private readonly List<CoreWebView2ContextMenuItem> _cachedContextMenuItems = [];
@@ -74,7 +77,6 @@ public sealed class WindowsNativeWebViewBackend
     private NativeWebViewControllerOptions? _preparedControllerOptions;
 
     private Uri? _currentUrl;
-    private Uri? _pendingNavigationUri;
 
     private GCHandle _selfHandle;
     private nint _parentWindowHandle;
@@ -93,6 +95,7 @@ public sealed class WindowsNativeWebViewBackend
     private bool _coreInitializedRaised;
     private bool _runtimeInitializationRequested;
     private bool _disposed;
+    private int _disposeState;
 
     private bool _canGoBack;
     private bool _canGoForward;
@@ -106,6 +109,8 @@ public sealed class WindowsNativeWebViewBackend
     private bool _suppressNextSameUrlNavigationCompletion;
     private string? _headerString;
     private string? _userAgentString;
+    private int _snapshotGeneration;
+    private string? _statusText;
     private NativeWebViewContextMenuTarget? _activeContextMenuTarget;
     private readonly Lock _pendingDownloadGate = new();
     private readonly List<PendingProgrammaticDownload> _pendingProgrammaticDownloads = [];
@@ -184,6 +189,8 @@ public sealed class WindowsNativeWebViewBackend
 
     public string? UserAgentString => _userAgentString;
 
+    public string? StatusText => _statusText;
+
     public event EventHandler<CoreWebViewInitializedEventArgs>? CoreWebView2Initialized;
 
     public event EventHandler<NativeWebViewNavigationStartedEventArgs>? NavigationStarted;
@@ -213,6 +220,8 @@ public sealed class WindowsNativeWebViewBackend
     public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested;
 
     public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
+
+    public event EventHandler<NativeWebViewStatusTextChangedEventArgs>? StatusTextChanged;
 
     public event EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? NavigationHistoryChanged;
 
@@ -276,13 +285,11 @@ public sealed class WindowsNativeWebViewBackend
 
         if (ShouldUseRuntimePath())
         {
-            _currentUrl = uri;
-            _pendingNavigationUri = uri;
             _runtimeInitializationRequested = true;
-
-            if (_coreWebView is not null)
+            var navigation = SetPendingRuntimeNavigation(uri);
+            if (navigation.IsRuntimeReady)
             {
-                NavigateCore(uri);
+                NavigateRuntimeIfCurrent(navigation);
             }
             else
             {
@@ -295,7 +302,7 @@ public sealed class WindowsNativeWebViewBackend
         if (OperatingSystem.IsWindows())
         {
             _currentUrl = uri;
-            _pendingNavigationUri = uri;
+            _ = _navigationReplayState.SetRequested(uri, isRuntimeReady: false);
             _runtimeInitializationRequested = true;
             return;
         }
@@ -310,13 +317,13 @@ public sealed class WindowsNativeWebViewBackend
 
         if (ShouldUseRuntimePath())
         {
-            if (_coreWebView is not null)
+            if (IsRuntimeReady())
             {
-                _coreWebView.Reload();
+                _coreWebView!.Reload();
             }
             else if (_currentUrl is not null)
             {
-                _pendingNavigationUri = _currentUrl;
+                _ = SetPendingRuntimeNavigation(_currentUrl);
                 _ = TryInitializeRuntimeInBackgroundAsync();
             }
 
@@ -337,9 +344,9 @@ public sealed class WindowsNativeWebViewBackend
         EnsureNotDisposed();
         EnsureFeature(NativeWebViewFeature.EmbeddedView, nameof(Stop));
 
-        if (_coreWebView is not null)
+        if (IsRuntimeReady())
         {
-            _coreWebView.Stop();
+            _coreWebView!.Stop();
         }
     }
 
@@ -350,7 +357,7 @@ public sealed class WindowsNativeWebViewBackend
 
         if (ShouldUseRuntimePath())
         {
-            if (_coreWebView is not null && _coreWebView.CanGoBack)
+            if (IsRuntimeReady() && _coreWebView!.CanGoBack)
             {
                 _coreWebView.GoBack();
             }
@@ -376,7 +383,7 @@ public sealed class WindowsNativeWebViewBackend
 
         if (ShouldUseRuntimePath())
         {
-            if (_coreWebView is not null && _coreWebView.CanGoForward)
+            if (IsRuntimeReady() && _coreWebView!.CanGoForward)
             {
                 _coreWebView.GoForward();
             }
@@ -447,6 +454,61 @@ public sealed class WindowsNativeWebViewBackend
         return await GetRuntimeFaviconAsync(faviconUri, resolvedFormat, cancellationToken).ConfigureAwait(false);
     }
 
+    public NativeWebViewSnapshotCapture BeginCaptureSnapshot(CancellationToken cancellationToken = default)
+    {
+        EnsureNotDisposed();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!IsRuntimeReady())
+            return NativeWebViewSnapshotCapture.FromResult(null);
+
+        var completion = CaptureSnapshotAsync(cancellationToken);
+        return new NativeWebViewSnapshotCapture(Task.CompletedTask, completion);
+    }
+
+    public async Task<NativeWebViewSnapshot?> CaptureSnapshotAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureNotDisposed();
+        cancellationToken.ThrowIfCancellationRequested();
+        var coreWebView = _coreWebView;
+        if (coreWebView is null || !_isRuntimeInitialized)
+            return null;
+
+        var generation = Volatile.Read(ref _snapshotGeneration);
+        try
+        {
+            using var stream = new MemoryStream();
+            await coreWebView
+                .CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream)
+                .ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!IsSnapshotCaptureCurrent(
+                    _disposed,
+                    generation,
+                    Volatile.Read(ref _snapshotGeneration),
+                    ReferenceEquals(coreWebView, _coreWebView)))
+            {
+                return null;
+            }
+
+            return stream.Length == 0 ? null : new NativeWebViewSnapshot(stream.ToArray());
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    internal static bool IsSnapshotCaptureCurrent(
+        bool isDisposed,
+        int captureGeneration,
+        int currentGeneration,
+        bool isSameWebView) =>
+        !isDisposed && captureGeneration == currentGeneration && isSameWebView;
+
     public async Task PostWebMessageAsJsonAsync(string message, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(message);
@@ -489,9 +551,9 @@ public sealed class WindowsNativeWebViewBackend
         EnsureNotDisposed();
         EnsureFeature(NativeWebViewFeature.DevTools, nameof(OpenDevToolsWindow));
 
-        if (ShouldUseRuntimePath() && _coreWebView is not null && _isDevToolsEnabled)
+        if (ShouldUseRuntimePath() && IsRuntimeReady() && _isDevToolsEnabled)
         {
-            _coreWebView.OpenDevToolsWindow();
+            _coreWebView!.OpenDevToolsWindow();
         }
 
         OpenDevToolsRequested?.Invoke(this, new NativeWebViewOpenDevToolsRequestedEventArgs());
@@ -585,9 +647,9 @@ public sealed class WindowsNativeWebViewBackend
 
         _zoomFactor = zoomFactor;
 
-        if (_controller is not null)
+        if (IsRuntimeReady())
         {
-            _controller.ZoomFactor = zoomFactor;
+            _controller!.ZoomFactor = zoomFactor;
         }
     }
 
@@ -651,12 +713,12 @@ public sealed class WindowsNativeWebViewBackend
         EnsureNotDisposed();
         EnsureFeature(NativeWebViewFeature.EmbeddedView, nameof(MoveFocus));
 
-        if (_controller is null)
+        if (!IsRuntimeReady())
         {
             return;
         }
 
-        _controller.MoveFocus(direction switch
+        _controller!.MoveFocus(direction switch
         {
             NativeWebViewFocusMoveDirection.Next => CoreWebView2MoveFocusReason.Next,
             NativeWebViewFocusMoveDirection.Previous => CoreWebView2MoveFocusReason.Previous,
@@ -817,11 +879,12 @@ public sealed class WindowsNativeWebViewBackend
 
     public void Dispose()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
         {
             return;
         }
 
+        _disposed = true;
         try
         {
             DetachFromNativeParentCore(preserveRuntime: false);
@@ -830,8 +893,6 @@ public sealed class WindowsNativeWebViewBackend
         {
             // Best-effort shutdown for native resources.
         }
-
-        _disposed = true;
 
         ReleaseComHandle(ref _viewComHandle);
         ReleaseComHandle(ref _controllerComHandle);
@@ -1048,9 +1109,9 @@ public sealed class WindowsNativeWebViewBackend
                 break;
 
             case Win32.WindowMessage.WM_SETFOCUS:
-                if (_controller is not null)
+                if (IsRuntimeReady())
                 {
-                    _controller.MoveFocus(CoreWebView2MoveFocusReason.Programmatic);
+                    _controller!.MoveFocus(CoreWebView2MoveFocusReason.Programmatic);
                 }
 
                 break;
@@ -1077,7 +1138,7 @@ public sealed class WindowsNativeWebViewBackend
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (_coreWebView is not null && _controller is not null)
+        if (IsRuntimeReady())
         {
             return;
         }
@@ -1085,7 +1146,7 @@ public sealed class WindowsNativeWebViewBackend
         await _runtimeGate.WaitAsync(cancellationToken).ConfigureAwait(true);
         try
         {
-            if (_coreWebView is not null && _controller is not null)
+            if (IsRuntimeReady())
             {
                 return;
             }
@@ -1134,20 +1195,26 @@ public sealed class WindowsNativeWebViewBackend
             AttachRuntimeEvents();
             ApplyRuntimeSettings();
             UpdateControllerBounds();
-            var requestedPendingNavigationUri = _pendingNavigationUri;
-            SyncNavigationSnapshotFromRuntime();
-            _pendingNavigationUri = ResolveInitializationNavigationTarget(requestedPendingNavigationUri, _currentUrl);
-
-            if (requestedPendingNavigationUri is not null)
+            SyncNavigationSnapshotFromRuntime(updatePendingNavigation: false);
+            var pendingNavigation = PublishRuntimeReady();
+            if (pendingNavigation.Uri is not null)
             {
-                NavigateCore(requestedPendingNavigationUri);
+                NavigateRuntimeIfCurrent(pendingNavigation);
             }
 
-            _isRuntimeInitialized = true;
             RaiseInitializedIfNeeded(success: true, initializationException: null, nativeObject: _coreWebView);
         }
         catch (Exception ex)
         {
+            try
+            {
+                DestroyRuntimeController();
+            }
+            catch (Exception cleanupException)
+            {
+                ex.Data["NativeWebView.RuntimeInitializationCleanupException"] = cleanupException;
+            }
+
             RaiseInitializedIfNeeded(success: false, initializationException: ex, nativeObject: null);
             throw;
         }
@@ -1239,6 +1306,43 @@ public sealed class WindowsNativeWebViewBackend
         return OperatingSystem.IsWindows() && _childWindowHandle != IntPtr.Zero;
     }
 
+    private bool IsRuntimeReady()
+    {
+        return IsRuntimeReady(
+            Volatile.Read(ref _isRuntimeInitialized),
+            _coreWebView is not null,
+            _controller is not null);
+    }
+
+    internal static bool IsRuntimeReady(bool isRuntimeInitialized, bool hasCoreWebView, bool hasController) =>
+        isRuntimeInitialized && hasCoreWebView && hasController;
+
+    private PendingRuntimeNavigation SetPendingRuntimeNavigation(Uri uri)
+    {
+        _currentUrl = uri;
+        var request = _navigationReplayState.SetRequested(uri, IsRuntimeReady());
+        return new PendingRuntimeNavigation(request.Uri, request.Version, request.IsRuntimeReady);
+    }
+
+    private PendingRuntimeNavigation PublishRuntimeReady()
+    {
+        Volatile.Write(ref _isRuntimeInitialized, true);
+        var request = _navigationReplayState.PublishRuntimeReady();
+        return new PendingRuntimeNavigation(request.Uri, request.Version, request.IsRuntimeReady);
+    }
+
+    private void NavigateRuntimeIfCurrent(PendingRuntimeNavigation navigation)
+    {
+        var request = new RuntimeNavigationRequest(
+            navigation.Uri,
+            navigation.Version,
+            navigation.IsRuntimeReady);
+        if (!_navigationReplayState.IsCurrent(request, _disposed, IsRuntimeReady()))
+            return;
+
+        NavigateCore(navigation.Uri!);
+    }
+
     private void NavigateFallback(Uri uri)
     {
         EnsureStubInitialized();
@@ -1258,7 +1362,7 @@ public sealed class WindowsNativeWebViewBackend
         _history.Add(uri);
         _historyIndex = _history.Count - 1;
         _currentUrl = uri;
-        _pendingNavigationUri = uri;
+        _navigationReplayState.TryUpdateReached(uri);
         UpdateHistorySnapshot(_historyIndex > 0, _historyIndex < _history.Count - 1);
         NavigationCompleted?.Invoke(this, new NativeWebViewNavigationCompletedEventArgs(uri, isSuccess: true, httpStatusCode: 200));
     }
@@ -1282,7 +1386,6 @@ public sealed class WindowsNativeWebViewBackend
             return;
         }
 
-        _pendingNavigationUri = uri;
         var navigationTarget = uri.IsAbsoluteUri
             ? uri.AbsoluteUri
             : uri.ToString();
@@ -1341,6 +1444,7 @@ public sealed class WindowsNativeWebViewBackend
         _coreWebView.WebMessageReceived += OnWebMessageReceived;
         _coreWebView.HistoryChanged += OnHistoryChanged;
         _coreWebView.FaviconChanged += OnFaviconChanged;
+        _coreWebView.StatusBarTextChanged += OnStatusBarTextChanged;
         _coreWebView.DownloadStarting += OnDownloadStarting;
         _coreWebView.NewWindowRequested += OnNewWindowRequested;
         _coreWebView.ContextMenuRequested += OnContextMenuRequested;
@@ -1349,6 +1453,7 @@ public sealed class WindowsNativeWebViewBackend
         _coreWebView.WebResourceRequested += OnWebResourceRequested;
         _coreWebView.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
         _controller.ZoomFactorChanged += OnZoomFactorChanged;
+        SetStatusText(_coreWebView.StatusBarText);
     }
 
     private void DetachRuntimeEvents()
@@ -1360,6 +1465,7 @@ public sealed class WindowsNativeWebViewBackend
             _coreWebView.WebMessageReceived -= OnWebMessageReceived;
             _coreWebView.HistoryChanged -= OnHistoryChanged;
             _coreWebView.FaviconChanged -= OnFaviconChanged;
+            _coreWebView.StatusBarTextChanged -= OnStatusBarTextChanged;
             _coreWebView.DownloadStarting -= OnDownloadStarting;
             _coreWebView.NewWindowRequested -= OnNewWindowRequested;
             _coreWebView.ContextMenuRequested -= OnContextMenuRequested;
@@ -1387,35 +1493,55 @@ public sealed class WindowsNativeWebViewBackend
         _activeContextMenuTarget = null;
         ClearCachedContextMenuItems();
         _contextMenuIconStreams.Reset();
+        SetStatusText(null);
     }
 
     private void DestroyRuntimeController()
     {
+        Interlocked.Increment(ref _snapshotGeneration);
+        Volatile.Write(ref _isRuntimeInitialized, false);
+        _navigationReplayState.RuntimeDestroyed();
         if (_controller is null && _coreWebView is null)
         {
             return;
         }
 
-        DetachRuntimeEvents();
-        ReleaseComHandle(ref _viewComHandle);
-        ReleaseComHandle(ref _controllerComHandle);
-
-        if (_controller is not null)
+        Exception? detachException = null;
+        try
         {
             try
             {
-                _controller.Close();
+                DetachRuntimeEvents();
             }
-            catch
+            catch (Exception ex)
             {
-                // Best-effort shutdown.
+                detachException = ex;
+            }
+
+            ReleaseComHandle(ref _viewComHandle);
+            ReleaseComHandle(ref _controllerComHandle);
+
+            if (_controller is not null)
+            {
+                try
+                {
+                    _controller.Close();
+                }
+                catch
+                {
+                    // Best-effort shutdown.
+                }
             }
         }
+        finally
+        {
+            _controller = null;
+            _coreWebView = null;
+            UpdateHistorySnapshot(canGoBack: false, canGoForward: false);
+        }
 
-        _controller = null;
-        _coreWebView = null;
-        _isRuntimeInitialized = false;
-        UpdateHistorySnapshot(canGoBack: false, canGoForward: false);
+        if (detachException is not null)
+            throw detachException;
     }
 
     [SupportedOSPlatform("windows")]
@@ -1452,7 +1578,7 @@ public sealed class WindowsNativeWebViewBackend
         _controller.Bounds = new Rectangle(0, 0, width, height);
     }
 
-    private void SyncNavigationSnapshotFromRuntime()
+    private void SyncNavigationSnapshotFromRuntime(bool updatePendingNavigation = true)
     {
         if (_coreWebView is null)
         {
@@ -1460,19 +1586,16 @@ public sealed class WindowsNativeWebViewBackend
         }
 
         _currentUrl = TryCreateUri(_coreWebView.Source) ?? _currentUrl;
-        _pendingNavigationUri = _currentUrl;
+        if (updatePendingNavigation)
+            _navigationReplayState.TryUpdateReached(_currentUrl);
         UpdateHistorySnapshot(_coreWebView.CanGoBack, _coreWebView.CanGoForward);
-    }
-
-    internal static Uri? ResolveInitializationNavigationTarget(Uri? requestedPendingNavigationUri, Uri? runtimeCurrentUri)
-    {
-        return requestedPendingNavigationUri ?? runtimeCurrentUri;
     }
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
         _activeContextMenuTarget = null;
         var uri = TryCreateUri(e.Uri);
+        _navigationReplayState.TrackNavigationStarted(e.NavigationId, uri, e.IsRedirected);
         if (ShouldSuppressTransientSameUrlNavigation(uri, e.IsRedirected))
         {
             e.Cancel = true;
@@ -1487,14 +1610,14 @@ public sealed class WindowsNativeWebViewBackend
 
     private void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
+        SyncNavigationSnapshotFromRuntime(updatePendingNavigation: false);
+        _navigationReplayState.CompleteNavigation(e.NavigationId, _currentUrl);
         if (_suppressNextSameUrlNavigationCompletion)
         {
             _suppressNextSameUrlNavigationCompletion = false;
-            SyncNavigationSnapshotFromRuntime();
             return;
         }
 
-        SyncNavigationSnapshotFromRuntime();
         var uri = _currentUrl ?? TryCreateUri(_coreWebView?.Source);
         var statusCode = e.IsSuccess ? TryConvertHttpStatusCode(e.HttpStatusCode) : null;
         var error = e.IsSuccess ? null : e.WebErrorStatus.ToString();
@@ -1504,6 +1627,28 @@ public sealed class WindowsNativeWebViewBackend
     private void OnFaviconChanged(object? sender, object? e)
     {
         FaviconChanged?.Invoke(this, new NativeWebViewFaviconChangedEventArgs(TryCreateFaviconUri()));
+    }
+
+    private readonly record struct PendingRuntimeNavigation(
+        Uri? Uri,
+        int Version,
+        bool IsRuntimeReady);
+
+    private void OnStatusBarTextChanged(object? sender, object e)
+    {
+        _ = sender;
+        _ = e;
+        SetStatusText(_coreWebView?.StatusBarText);
+    }
+
+    private void SetStatusText(string? statusText)
+    {
+        var normalized = NativeWebViewStatusTextNormalizer.Normalize(statusText);
+        if (string.Equals(_statusText, normalized, StringComparison.Ordinal))
+            return;
+
+        _statusText = normalized;
+        StatusTextChanged?.Invoke(this, new NativeWebViewStatusTextChangedEventArgs(normalized));
     }
 
     private void SuppressTransientSameUrlNavigation()
