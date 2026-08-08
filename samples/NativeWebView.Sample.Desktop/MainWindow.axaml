@@ -175,6 +175,12 @@
                     <TextBlock VerticalAlignment="Center" Text="Capture Render Frame" />
                   </StackPanel>
                 </Button>
+                <Button Classes="menu-action" Click="CaptureEmbeddedSnapshotMenuItemOnClick">
+                  <StackPanel Orientation="Horizontal" Spacing="8">
+                    <fi:SymbolIcon Symbol="Camera" />
+                    <TextBlock VerticalAlignment="Center" Text="Capture Embedded Snapshot" />
+                  </StackPanel>
+                </Button>
                 <Button Classes="menu-action" Click="SaveRenderFrameMenuItemOnClick">
                   <StackPanel Orientation="Horizontal" Spacing="8">
                     <fi:SymbolIcon Symbol="Save" />

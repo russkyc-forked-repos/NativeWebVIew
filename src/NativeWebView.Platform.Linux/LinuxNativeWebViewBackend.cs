@@ -12,6 +12,8 @@ public sealed class LinuxNativeWebViewBackend
       INativeWebViewInstanceConfigurationTarget,
       INativeWebViewNativeControlAttachment,
       INativeWebViewFaviconProvider,
+      INativeWebViewSnapshotProvider,
+      INativeWebViewStatusTextProvider,
       INativeWebViewContextMenuBackend
 {
     private static readonly NativePlatformHandle PlaceholderPlatformHandle = new(0x3001, "XID");
@@ -79,6 +81,8 @@ public sealed class LinuxNativeWebViewBackend
     private readonly Dictionary<IntPtr, NativeWebViewDownloadManager.NativeWebViewDownloadItem> _downloadItems = [];
     private readonly Dictionary<IntPtr, Uri> _downloadUris = [];
     private readonly Lock _pendingDownloadGate = new();
+    private readonly RuntimeNavigationReplayState _navigationReplayState = new();
+    private readonly LinuxRuntimeNavigationLifecycle _runtimeNavigationLifecycle = new();
     private readonly List<PendingProgrammaticDownload> _pendingProgrammaticDownloads = [];
 
     private TaskCompletionSource<bool> _attachmentTcs = CreatePendingAttachmentSource();
@@ -88,7 +92,6 @@ public sealed class LinuxNativeWebViewBackend
     private NativeWebViewControllerOptions? _preparedControllerOptions;
 
     private Uri? _currentUrl;
-    private Uri? _pendingNavigationUri;
 
     private nint _parentWindowXid;
     private nint _gtkWindow;
@@ -108,6 +111,7 @@ public sealed class LinuxNativeWebViewBackend
     private bool _runtimeInitializationRequested;
     private bool _ownsGtkWindow;
     private bool _disposed;
+    private int _disposeState;
 
     private bool _canGoBack;
     private bool _canGoForward;
@@ -121,7 +125,9 @@ public sealed class LinuxNativeWebViewBackend
     private string? _userAgentString;
     private Uri? _faviconUri;
     private int _faviconRefreshVersion;
+    private int _snapshotGeneration;
     private string? _activeContextMenuTargetToken;
+    private string? _statusText;
 
     public LinuxNativeWebViewBackend()
     {
@@ -194,6 +200,8 @@ public sealed class LinuxNativeWebViewBackend
 
     public string? UserAgentString => _userAgentString;
 
+    public string? StatusText => _statusText;
+
     public event EventHandler<CoreWebViewInitializedEventArgs>? CoreWebView2Initialized;
 
     public event EventHandler<NativeWebViewNavigationStartedEventArgs>? NavigationStarted;
@@ -223,6 +231,8 @@ public sealed class LinuxNativeWebViewBackend
     public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested;
 
     public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
+
+    public event EventHandler<NativeWebViewStatusTextChangedEventArgs>? StatusTextChanged;
 
     public event EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? NavigationHistoryChanged;
 
@@ -285,13 +295,11 @@ public sealed class LinuxNativeWebViewBackend
 
         if (ShouldUseRuntimePath())
         {
-            _currentUrl = uri;
-            _pendingNavigationUri = uri;
             _runtimeInitializationRequested = true;
-
-            if (_webView != IntPtr.Zero)
+            var navigation = SetPendingRuntimeNavigation(uri);
+            if (navigation.IsRuntimeReady)
             {
-                _ = LinuxGtkDispatcher.InvokeAsync(() => LinuxNativeInterop.webkit_web_view_load_uri(_webView, ToNavigationString(uri)));
+                ScheduleRuntimeNavigation(navigation);
             }
             else
             {
@@ -304,7 +312,7 @@ public sealed class LinuxNativeWebViewBackend
         if (OperatingSystem.IsLinux())
         {
             _currentUrl = uri;
-            _pendingNavigationUri = uri;
+            _ = _navigationReplayState.SetRequested(uri, isRuntimeReady: false);
             _runtimeInitializationRequested = true;
             return;
         }
@@ -319,13 +327,13 @@ public sealed class LinuxNativeWebViewBackend
 
         if (ShouldUseRuntimePath())
         {
-            if (_webView != IntPtr.Zero)
+            if (IsRuntimeReady())
             {
                 _ = LinuxGtkDispatcher.InvokeAsync(() => LinuxNativeInterop.webkit_web_view_reload(_webView));
             }
             else if (_currentUrl is not null)
             {
-                _pendingNavigationUri = _currentUrl;
+                _ = SetPendingRuntimeNavigation(_currentUrl);
                 _ = TryInitializeRuntimeInBackgroundAsync();
             }
 
@@ -346,7 +354,7 @@ public sealed class LinuxNativeWebViewBackend
         EnsureNotDisposed();
         EnsureFeature(NativeWebViewFeature.EmbeddedView, nameof(Stop));
 
-        if (_webView != IntPtr.Zero)
+        if (IsRuntimeReady())
         {
             _ = LinuxGtkDispatcher.InvokeAsync(() => LinuxNativeInterop.webkit_web_view_stop_loading(_webView));
         }
@@ -359,7 +367,7 @@ public sealed class LinuxNativeWebViewBackend
 
         if (ShouldUseRuntimePath())
         {
-            if (_webView != IntPtr.Zero)
+            if (IsRuntimeReady())
             {
                 _ = LinuxGtkDispatcher.InvokeAsync(() =>
                 {
@@ -391,7 +399,7 @@ public sealed class LinuxNativeWebViewBackend
 
         if (ShouldUseRuntimePath())
         {
-            if (_webView != IntPtr.Zero)
+            if (IsRuntimeReady())
             {
                 _ = LinuxGtkDispatcher.InvokeAsync(() =>
                 {
@@ -456,6 +464,57 @@ public sealed class LinuxNativeWebViewBackend
             faviconUri,
             format,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    public NativeWebViewSnapshotCapture BeginCaptureSnapshot(CancellationToken cancellationToken = default)
+    {
+        EnsureNotDisposed();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!OperatingSystem.IsLinux() || !IsRuntimeReady())
+            return NativeWebViewSnapshotCapture.FromResult(null);
+
+        var generation = Volatile.Read(ref _snapshotGeneration);
+        var captureStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completion = CaptureSnapshotCoreAsync(generation, captureStarted, cancellationToken);
+        return new NativeWebViewSnapshotCapture(captureStarted.Task, completion);
+    }
+
+    public Task<NativeWebViewSnapshot?> CaptureSnapshotAsync(CancellationToken cancellationToken = default) =>
+        BeginCaptureSnapshot(cancellationToken).Completion;
+
+    private async Task<NativeWebViewSnapshot?> CaptureSnapshotCoreAsync(
+        int generation,
+        TaskCompletionSource captureStarted,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var captureTask = await LinuxGtkDispatcher.InvokeAsync(
+                () =>
+                {
+                    var pendingCapture = LinuxNativeInterop.CaptureSnapshotPngAsync(_webView, cancellationToken);
+                    captureStarted.TrySetResult();
+                    return pendingCapture;
+                },
+                cancellationToken).ConfigureAwait(false);
+            var pngData = await captureTask.ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_disposed || generation != Volatile.Read(ref _snapshotGeneration) || pngData is not { Length: > 0 })
+                return null;
+            return new NativeWebViewSnapshot(pngData);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            captureStarted.TrySetResult();
+        }
     }
 
     public async Task PostWebMessageAsJsonAsync(string message, CancellationToken cancellationToken = default)
@@ -598,7 +657,7 @@ public sealed class LinuxNativeWebViewBackend
         }
 
         _zoomFactor = zoomFactor;
-        if (_webView != IntPtr.Zero)
+        if (IsRuntimeReady())
         {
             _ = LinuxGtkDispatcher.InvokeAsync(() => LinuxNativeInterop.webkit_web_view_set_zoom_level(_webView, zoomFactor));
         }
@@ -664,7 +723,7 @@ public sealed class LinuxNativeWebViewBackend
         EnsureNotDisposed();
         EnsureFeature(NativeWebViewFeature.EmbeddedView, nameof(MoveFocus));
 
-        if (_webView != IntPtr.Zero)
+        if (IsRuntimeReady())
         {
             _ = LinuxGtkDispatcher.InvokeAsync(() => LinuxNativeInterop.gtk_widget_grab_focus(_webView));
         }
@@ -823,11 +882,12 @@ public sealed class LinuxNativeWebViewBackend
 
     public void Dispose()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposeState, 1) != 0)
         {
             return;
         }
 
+        _disposed = true;
         try
         {
             DetachFromNativeParentCore(preserveRuntime: false);
@@ -837,7 +897,6 @@ public sealed class LinuxNativeWebViewBackend
             // Best-effort shutdown for native resources.
         }
 
-        _disposed = true;
         Interlocked.Increment(ref _faviconRefreshVersion);
         _preparedEnvironmentOptions = null;
         _preparedControllerOptions = null;
@@ -890,81 +949,97 @@ public sealed class LinuxNativeWebViewBackend
 
     private void DestroyRuntimeHost()
     {
-        if (!OperatingSystem.IsLinux())
-        {
-            _gtkWindow = IntPtr.Zero;
-            _webView = IntPtr.Zero;
-            _settings = IntPtr.Zero;
-            _webContext = IntPtr.Zero;
-            _websiteDataManager = IntPtr.Zero;
-            _userContentManager = IntPtr.Zero;
-            _isRuntimeInitialized = false;
-            UpdateHistorySnapshot(canGoBack: false, canGoForward: false);
-            return;
-        }
-
-        if (_gtkWindow == IntPtr.Zero &&
-            _webContext == IntPtr.Zero &&
-            _signalSubscriptions.Count == 0)
-        {
-            _isRuntimeInitialized = false;
-            UpdateHistorySnapshot(canGoBack: false, canGoForward: false);
-            return;
-        }
-
+        Interlocked.Increment(ref _snapshotGeneration);
+        _isRuntimeInitialized = false;
+        _navigationReplayState.RuntimeDestroyed();
         try
         {
-            LinuxGtkDispatcher.InvokeAsync(() =>
+            if (!OperatingSystem.IsLinux())
             {
-                ClearContextMenuActions();
-                foreach (var subscription in _signalSubscriptions)
-                {
-                    subscription.Dispose();
-                }
-
-                _signalSubscriptions.Clear();
-
-                if (_ownsGtkWindow)
-                {
-                    if (_gtkWindow != IntPtr.Zero)
-                    {
-                        LinuxNativeInterop.gtk_widget_destroy(_gtkWindow);
-                    }
-                }
-                else if (_webView != IntPtr.Zero)
-                {
-                    LinuxNativeInterop.gtk_widget_destroy(_webView);
-                }
-
-                if (_webContext != IntPtr.Zero)
-                {
-                    LinuxNativeInterop.g_object_unref(_webContext);
-                }
-
+                _runtimeNavigationLifecycle.RuntimeDestroyed();
                 _gtkWindow = IntPtr.Zero;
                 _webView = IntPtr.Zero;
                 _settings = IntPtr.Zero;
                 _webContext = IntPtr.Zero;
                 _websiteDataManager = IntPtr.Zero;
                 _userContentManager = IntPtr.Zero;
-            }).GetAwaiter().GetResult();
-        }
-        catch
-        {
-            _contextMenuActionSubscriptions.Clear();
-            _contextMenuActions.Clear();
-            _activeContextMenuTargetToken = null;
-            _signalSubscriptions.Clear();
-            _gtkWindow = IntPtr.Zero;
-            _webView = IntPtr.Zero;
-            _settings = IntPtr.Zero;
-            _webContext = IntPtr.Zero;
-            _websiteDataManager = IntPtr.Zero;
-            _userContentManager = IntPtr.Zero;
-        }
+                _isRuntimeInitialized = false;
+                UpdateHistorySnapshot(canGoBack: false, canGoForward: false);
+                return;
+            }
 
-        _isRuntimeInitialized = false;
-        UpdateHistorySnapshot(canGoBack: false, canGoForward: false);
+            if (_gtkWindow == IntPtr.Zero &&
+                _webContext == IntPtr.Zero &&
+                _signalSubscriptions.Count == 0)
+            {
+                _runtimeNavigationLifecycle.RuntimeDestroyed();
+                _isRuntimeInitialized = false;
+                UpdateHistorySnapshot(canGoBack: false, canGoForward: false);
+                return;
+            }
+
+            try
+            {
+                LinuxGtkDispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        ClearContextMenuActions();
+                        DisposeSubscriptions(_signalSubscriptions);
+                        _signalSubscriptions.Clear();
+
+                        if (_ownsGtkWindow)
+                        {
+                            if (_gtkWindow != IntPtr.Zero)
+                            {
+                                LinuxNativeInterop.gtk_widget_destroy(_gtkWindow);
+                            }
+                        }
+                        else if (_webView != IntPtr.Zero)
+                        {
+                            LinuxNativeInterop.gtk_widget_destroy(_webView);
+                        }
+
+                        if (_webContext != IntPtr.Zero)
+                        {
+                            LinuxNativeInterop.g_object_unref(_webContext);
+                        }
+
+                        _gtkWindow = IntPtr.Zero;
+                        _webView = IntPtr.Zero;
+                        _settings = IntPtr.Zero;
+                        _webContext = IntPtr.Zero;
+                        _websiteDataManager = IntPtr.Zero;
+                        _userContentManager = IntPtr.Zero;
+                    }
+                    finally
+                    {
+                        _runtimeNavigationLifecycle.RuntimeDestroyed();
+                    }
+                }).GetAwaiter().GetResult();
+            }
+            catch
+            {
+                _runtimeNavigationLifecycle.RuntimeDestroyed();
+                _contextMenuActionSubscriptions.Clear();
+                _contextMenuActions.Clear();
+                _activeContextMenuTargetToken = null;
+                _signalSubscriptions.Clear();
+                _gtkWindow = IntPtr.Zero;
+                _webView = IntPtr.Zero;
+                _settings = IntPtr.Zero;
+                _webContext = IntPtr.Zero;
+                _websiteDataManager = IntPtr.Zero;
+                _userContentManager = IntPtr.Zero;
+            }
+
+            _isRuntimeInitialized = false;
+            UpdateHistorySnapshot(canGoBack: false, canGoForward: false);
+        }
+        finally
+        {
+            SetStatusText(null);
+        }
     }
 
     private static TaskCompletionSource<bool> CreatePendingAttachmentSource()
@@ -990,7 +1065,7 @@ public sealed class LinuxNativeWebViewBackend
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (_webView != IntPtr.Zero)
+        if (IsRuntimeReady())
         {
             return;
         }
@@ -998,7 +1073,7 @@ public sealed class LinuxNativeWebViewBackend
         await _runtimeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_webView != IntPtr.Zero)
+            if (IsRuntimeReady())
             {
                 return;
             }
@@ -1010,7 +1085,11 @@ public sealed class LinuxNativeWebViewBackend
                 InitializeRuntimeOnGtkThread,
                 cancellationToken).ConfigureAwait(false);
 
-            _isRuntimeInitialized = true;
+            var pendingNavigation = PublishRuntimeReady();
+            if (pendingNavigation.Uri is not null)
+            {
+                await ScheduleRuntimeNavigationAsync(pendingNavigation, cancellationToken).ConfigureAwait(false);
+            }
             RaiseInitializedIfNeeded(
                 success: true,
                 initializationException: null,
@@ -1018,6 +1097,17 @@ public sealed class LinuxNativeWebViewBackend
         }
         catch (Exception ex)
         {
+            try
+            {
+                await LinuxGtkDispatcher.InvokeAsync(
+                    RollbackRuntimeInitializationOnGtkThread,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception cleanupException)
+            {
+                ex.Data["NativeWebView.RuntimeInitializationCleanupException"] = cleanupException;
+            }
+
             RaiseInitializedIfNeeded(success: false, initializationException: ex, nativeObject: null);
             throw;
         }
@@ -1052,6 +1142,61 @@ public sealed class LinuxNativeWebViewBackend
         }
 
         await _attachmentTcs.Task.ConfigureAwait(false);
+    }
+
+    private bool IsRuntimeReady()
+    {
+        return IsRuntimeReady(Volatile.Read(ref _isRuntimeInitialized), _webView != IntPtr.Zero);
+    }
+
+    internal static bool IsRuntimeReady(bool isRuntimeInitialized, bool hasWebView) =>
+        isRuntimeInitialized && hasWebView;
+
+    private PendingRuntimeNavigation SetPendingRuntimeNavigation(Uri uri)
+    {
+        _currentUrl = uri;
+        var request = _navigationReplayState.SetRequested(uri, IsRuntimeReady());
+        return new PendingRuntimeNavigation(request.Uri, request.Version, request.IsRuntimeReady);
+    }
+
+    private PendingRuntimeNavigation PublishRuntimeReady()
+    {
+        Volatile.Write(ref _isRuntimeInitialized, true);
+        var request = _navigationReplayState.PublishRuntimeReady();
+        return new PendingRuntimeNavigation(request.Uri, request.Version, request.IsRuntimeReady);
+    }
+
+    private void ScheduleRuntimeNavigation(PendingRuntimeNavigation navigation)
+    {
+        _ = ScheduleRuntimeNavigationAsync(navigation, CancellationToken.None);
+    }
+
+    private Task ScheduleRuntimeNavigationAsync(
+        PendingRuntimeNavigation navigation,
+        CancellationToken cancellationToken)
+    {
+        return LinuxGtkDispatcher.InvokeAsync(
+            () =>
+            {
+                if (!IsPendingRuntimeNavigationCurrent(navigation))
+                {
+                    return;
+                }
+
+                LinuxNativeInterop.webkit_web_view_load_uri(
+                    _webView,
+                    ToNavigationString(navigation.Uri!));
+            },
+            cancellationToken);
+    }
+
+    private bool IsPendingRuntimeNavigationCurrent(PendingRuntimeNavigation navigation)
+    {
+        var request = new RuntimeNavigationRequest(
+            navigation.Uri,
+            navigation.Version,
+            navigation.IsRuntimeReady);
+        return _navigationReplayState.IsCurrent(request, _disposed, IsRuntimeReady());
     }
 
     private void EnsurePreparedInitializationOptions()
@@ -1129,7 +1274,7 @@ public sealed class LinuxNativeWebViewBackend
         _history.Add(uri);
         _historyIndex = _history.Count - 1;
         _currentUrl = uri;
-        _pendingNavigationUri = uri;
+        _navigationReplayState.TryUpdateReached(uri);
         UpdateHistorySnapshot(_historyIndex > 0, _historyIndex < _history.Count - 1);
         NavigationCompleted?.Invoke(this, new NativeWebViewNavigationCompletedEventArgs(uri, isSuccess: true, httpStatusCode: 200));
     }
@@ -1282,16 +1427,74 @@ public sealed class LinuxNativeWebViewBackend
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "decide-policy", new LinuxNativeInterop.DecidePolicySignal(OnDecidePolicy)));
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "close", new LinuxNativeInterop.CloseSignal(OnCloseRequested)));
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "context-menu", new LinuxNativeInterop.ContextMenuSignal(OnContextMenu)));
+        _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "mouse-target-changed", new LinuxNativeInterop.MouseTargetChangedSignal(OnMouseTargetChanged)));
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_userContentManager, $"script-message-received::{ScriptMessageHandlerName}", new LinuxNativeInterop.ScriptMessageReceivedSignal(OnScriptMessageReceived)));
 
         LinuxNativeInterop.gtk_container_add(_gtkWindow, _webView);
         LinuxNativeInterop.gtk_widget_show_all(_gtkWindow);
         ApplyRuntimeSettingsOnGtkThread();
-        SyncNavigationSnapshotFromRuntimeOnGtkThread();
+        SyncNavigationSnapshotFromRuntimeOnGtkThread(updatePendingNavigation: false);
 
-        if (_pendingNavigationUri is not null)
+    }
+
+    [SupportedOSPlatform("linux")]
+    private void RollbackRuntimeInitializationOnGtkThread()
+    {
+        Volatile.Write(ref _isRuntimeInitialized, false);
+        _navigationReplayState.RuntimeDestroyed();
+        _runtimeNavigationLifecycle.RuntimeDestroyed();
+
+        try
         {
-            LinuxNativeInterop.webkit_web_view_load_uri(_webView, ToNavigationString(_pendingNavigationUri));
+            ClearContextMenuActions();
+        }
+        catch
+        {
+            _contextMenuActionSubscriptions.Clear();
+            _contextMenuActions.Clear();
+            _activeContextMenuTargetToken = null;
+        }
+
+        DisposeSubscriptions(_signalSubscriptions);
+        _signalSubscriptions.Clear();
+
+        if (_webView != IntPtr.Zero)
+        {
+            try
+            {
+                LinuxNativeInterop.gtk_widget_destroy(_webView);
+            }
+            catch
+            {
+                // Continue releasing the remaining partially initialized resources.
+            }
+        }
+
+        if (_webContext != IntPtr.Zero)
+        {
+            try
+            {
+                LinuxNativeInterop.g_object_unref(_webContext);
+            }
+            catch
+            {
+                // Continue clearing managed references after a native cleanup failure.
+            }
+        }
+
+        _webView = IntPtr.Zero;
+        _settings = IntPtr.Zero;
+        _webContext = IntPtr.Zero;
+        _websiteDataManager = IntPtr.Zero;
+        _userContentManager = IntPtr.Zero;
+
+        try
+        {
+            SetStatusText(null);
+        }
+        catch
+        {
+            // Rollback must not replace the initialization failure with a subscriber exception.
         }
     }
 
@@ -1367,10 +1570,11 @@ public sealed class LinuxNativeWebViewBackend
     }
 
     [SupportedOSPlatform("linux")]
-    private void SyncNavigationSnapshotFromRuntimeOnGtkThread()
+    private void SyncNavigationSnapshotFromRuntimeOnGtkThread(bool updatePendingNavigation = true)
     {
         _currentUrl = TryCreateUri(LinuxNativeInterop.ConvertUtf8Pointer(LinuxNativeInterop.webkit_web_view_get_uri(_webView))) ?? _currentUrl;
-        _pendingNavigationUri = _currentUrl;
+        if (updatePendingNavigation)
+            _navigationReplayState.TryUpdateReached(_currentUrl);
         UpdateHistorySnapshot(
             LinuxNativeInterop.webkit_web_view_can_go_back(_webView),
             LinuxNativeInterop.webkit_web_view_can_go_forward(_webView));
@@ -1384,7 +1588,19 @@ public sealed class LinuxNativeWebViewBackend
 
         switch (loadEvent)
         {
+            case LinuxNativeInterop.WebKitLoadEvent.Started:
+                var navigationId = _runtimeNavigationLifecycle.StartNavigation();
+                _navigationReplayState.TrackNavigationStarted(
+                    navigationId,
+                    TryCreateUri(LinuxNativeInterop.ConvertUtf8Pointer(LinuxNativeInterop.webkit_web_view_get_uri(webView))),
+                    isRedirected: false);
+                break;
+
             case LinuxNativeInterop.WebKitLoadEvent.Redirected:
+                _navigationReplayState.TrackNavigationStarted(
+                    _runtimeNavigationLifecycle.CurrentNavigationId,
+                    TryCreateUri(LinuxNativeInterop.ConvertUtf8Pointer(LinuxNativeInterop.webkit_web_view_get_uri(webView))),
+                    isRedirected: true);
                 NavigationStarted?.Invoke(
                     this,
                     new NativeWebViewNavigationStartedEventArgs(
@@ -1393,11 +1609,15 @@ public sealed class LinuxNativeWebViewBackend
                 break;
 
             case LinuxNativeInterop.WebKitLoadEvent.Committed:
-                SyncNavigationSnapshotFromRuntimeOnGtkThread();
+                SyncNavigationSnapshotFromRuntimeOnGtkThread(updatePendingNavigation: false);
                 break;
 
             case LinuxNativeInterop.WebKitLoadEvent.Finished:
-                SyncNavigationSnapshotFromRuntimeOnGtkThread();
+                SyncNavigationSnapshotFromRuntimeOnGtkThread(updatePendingNavigation: false);
+                if (!_runtimeNavigationLifecycle.TryFinishNavigation(out var finishedNavigationId))
+                    break;
+
+                _navigationReplayState.CompleteNavigation(finishedNavigationId, _currentUrl);
                 var faviconRefreshVersion = Interlocked.Increment(ref _faviconRefreshVersion);
                 _ = RefreshRuntimeFaviconAsync(faviconRefreshVersion);
                 NavigationCompleted?.Invoke(
@@ -1450,7 +1670,8 @@ public sealed class LinuxNativeWebViewBackend
         var uri = TryCreateUri(LinuxNativeInterop.ConvertUtf8Pointer(failingUri));
         var message = LinuxNativeInterop.GetErrorMessageAndFree(error);
         _currentUrl = uri ?? _currentUrl;
-        _pendingNavigationUri = _currentUrl;
+        var failedNavigationId = _runtimeNavigationLifecycle.FailNavigation();
+        _navigationReplayState.CompleteNavigation(uri, failedNavigationId, _currentUrl);
         UpdateHistorySnapshot(
             LinuxNativeInterop.webkit_web_view_can_go_back(webView),
             LinuxNativeInterop.webkit_web_view_can_go_forward(webView));
@@ -1460,6 +1681,58 @@ public sealed class LinuxNativeWebViewBackend
             new NativeWebViewNavigationCompletedEventArgs(uri, isSuccess: false, error: message));
 
         return 0;
+    }
+
+    [SupportedOSPlatform("linux")]
+    private void OnMouseTargetChanged(IntPtr webView, IntPtr hitTestResult, uint modifiers, IntPtr userData)
+    {
+        try
+        {
+            _ = webView;
+            _ = modifiers;
+            _ = userData;
+            if (!CanAcceptMouseStatus(_disposed, Volatile.Read(ref _isRuntimeInitialized)))
+            {
+                SetStatusText(null);
+                return;
+            }
+
+            var statusText = hitTestResult != IntPtr.Zero && LinuxNativeInterop.webkit_hit_test_result_context_is_link(hitTestResult)
+                ? LinuxNativeInterop.ConvertUtf8Pointer(
+                    LinuxNativeInterop.webkit_hit_test_result_get_link_uri(hitTestResult),
+                    NativeWebViewStatusTextNormalizer.MaximumLength * 4)
+                : null;
+            SetStatusText(statusText);
+        }
+        catch
+        {
+            try
+            {
+                SetStatusText(null);
+            }
+            catch
+            {
+                // Managed exceptions must never cross the native GTK callback boundary.
+            }
+        }
+    }
+
+    internal static bool CanAcceptMouseStatus(bool isDisposed, bool isRuntimeInitialized) =>
+        !isDisposed && isRuntimeInitialized;
+
+    private readonly record struct PendingRuntimeNavigation(
+        Uri? Uri,
+        int Version,
+        bool IsRuntimeReady);
+
+    private void SetStatusText(string? statusText)
+    {
+        var normalized = NativeWebViewStatusTextNormalizer.Normalize(statusText);
+        if (string.Equals(_statusText, normalized, StringComparison.Ordinal))
+            return;
+
+        _statusText = normalized;
+        StatusTextChanged?.Invoke(this, new NativeWebViewStatusTextChangedEventArgs(normalized));
     }
 
     private void OnDownloadStarted(IntPtr context, IntPtr download, IntPtr userData)
@@ -1808,10 +2081,24 @@ public sealed class LinuxNativeWebViewBackend
 
     private void ClearContextMenuActions()
     {
-        foreach (var subscription in _contextMenuActionSubscriptions)
-            subscription.Dispose();
+        DisposeSubscriptions(_contextMenuActionSubscriptions);
         _contextMenuActionSubscriptions.Clear();
         _contextMenuActions.Clear();
+    }
+
+    internal static void DisposeSubscriptions(IReadOnlyList<IDisposable> subscriptions)
+    {
+        for (var index = 0; index < subscriptions.Count; index++)
+        {
+            try
+            {
+                subscriptions[index].Dispose();
+            }
+            catch
+            {
+                // Native teardown is best effort; continue releasing every remaining resource.
+            }
+        }
     }
 
     public async Task<bool> InsertTextAtContextMenuTargetAsync(

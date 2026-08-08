@@ -24,6 +24,7 @@ internal static class MacOSPlatformFeatures
         NativeWebViewFeature.GpuSurfaceRendering |
         NativeWebViewFeature.OffscreenRendering |
         NativeWebViewFeature.RenderFrameCapture |
+        NativeWebViewFeature.EmbeddedSnapshotCapture |
         NativeWebViewFeature.Favicon |
         NativeWebViewFeature.Downloads;
 

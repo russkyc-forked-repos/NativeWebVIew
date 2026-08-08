@@ -1,4 +1,5 @@
 using NativeWebView.Core;
+using NativeWebViewControl = NativeWebView.Controls.NativeWebView;
 
 namespace NativeWebView.Core.Tests;
 
@@ -78,6 +79,130 @@ public sealed class ControllerOrchestrationTests
     }
 
     [Fact]
+    public void NativeWebViewController_ForwardsNormalizedStatusText_WithoutDuplicates()
+    {
+        var backend = new TestWebViewBackend();
+        using var controller = new NativeWebViewController(backend);
+        var changes = new List<string?>();
+        controller.StatusTextChanged += (_, args) => changes.Add(args.StatusText);
+
+        backend.EmitStatusText("  https://example.com/target  ");
+        backend.EmitStatusText("https://example.com/target");
+        backend.EmitStatusText("   ");
+
+        Assert.Null(controller.StatusText);
+        Assert.Equal(["https://example.com/target", null], changes);
+    }
+
+    [Fact]
+    public void NativeWebViewController_InitializesStatusText_FromProvider()
+    {
+        var backend = new TestWebViewBackend();
+        backend.EmitStatusText("  https://example.com/initial  ");
+
+        using var controller = new NativeWebViewController(backend);
+
+        Assert.Equal("https://example.com/initial", controller.StatusText);
+    }
+
+    [Fact]
+    public void NativeWebViewController_ClearsAndUnsubscribesStatusText_WhenDisposed()
+    {
+        var backend = new TestWebViewBackend();
+        var controller = new NativeWebViewController(backend);
+        var changes = new List<string?>();
+        controller.StatusTextChanged += (_, args) => changes.Add(args.StatusText);
+        backend.EmitStatusText("https://example.com/target");
+
+        controller.Dispose();
+        backend.EmitStatusText("https://example.com/stale");
+
+        Assert.Null(controller.StatusText);
+        Assert.Equal(["https://example.com/target", null], changes);
+    }
+
+    [Fact]
+    public async Task NativeWebViewController_DoesNotBlockDisposalWhileStatusSubscriberRuns()
+    {
+        var backend = new TestWebViewBackend();
+        var controller = new NativeWebViewController(backend);
+        var changes = new List<string?>();
+        using var statusEntered = new ManualResetEventSlim();
+        using var releaseStatus = new ManualResetEventSlim();
+        using var disposeStarted = new ManualResetEventSlim();
+        controller.StatusTextChanged += (_, args) =>
+        {
+            changes.Add(args.StatusText);
+            if (args.StatusText is not null)
+            {
+                statusEntered.Set();
+                releaseStatus.Wait();
+            }
+        };
+
+        var statusTask = Task.Run(() => backend.EmitStatusText("https://example.com/target"));
+        Assert.True(statusEntered.Wait(TimeSpan.FromSeconds(5)));
+
+        var disposeTask = Task.Run(() =>
+        {
+            disposeStarted.Set();
+            controller.Dispose();
+        });
+        Assert.True(disposeStarted.Wait(TimeSpan.FromSeconds(5)));
+
+        try
+        {
+            var completedTask = await Task.WhenAny(
+                backend.DisposedTask,
+                Task.Delay(TimeSpan.FromSeconds(5)));
+            Assert.Same(backend.DisposedTask, completedTask);
+        }
+        finally
+        {
+            releaseStatus.Set();
+        }
+
+        await Task.WhenAll(statusTask, disposeTask);
+        Assert.Null(controller.StatusText);
+        Assert.True(backend.IsDisposed);
+        Assert.Equal(["https://example.com/target", null], changes);
+    }
+
+    [Fact]
+    public void NativeWebViewController_AllowsStatusSubscriberToDisposeController()
+    {
+        var backend = new TestWebViewBackend();
+        var controller = new NativeWebViewController(backend);
+        var changes = new List<string?>();
+        controller.StatusTextChanged += (_, args) =>
+        {
+            changes.Add(args.StatusText);
+            if (args.StatusText is not null)
+                controller.Dispose();
+        };
+
+        backend.EmitStatusText("https://example.com/target");
+
+        Assert.Equal(["https://example.com/target", null], changes);
+        Assert.Null(controller.StatusText);
+        Assert.True(backend.IsDisposed);
+    }
+
+    [Fact]
+    public void NativeWebViewController_DisposesBackend_WhenStatusSubscriberThrowsDuringTeardown()
+    {
+        var backend = new TestWebViewBackend();
+        backend.EmitStatusText("https://example.com/target");
+        var controller = new NativeWebViewController(backend);
+        controller.StatusTextChanged += (_, _) => throw new InvalidOperationException("Subscriber failure.");
+
+        Assert.Throws<InvalidOperationException>(() => controller.Dispose());
+
+        Assert.True(backend.IsDisposed);
+        Assert.Equal(NativeWebComponentState.Disposed, controller.State);
+    }
+
+    [Fact]
     public async Task NativeWebViewController_DisposeDuringInitialization_StaysDisposed()
     {
         var backend = new TestWebViewBackend(
@@ -93,6 +218,67 @@ public sealed class ControllerOrchestrationTests
 
         Assert.Equal(NativeWebComponentState.Disposed, controller.State);
         Assert.Throws<ObjectDisposedException>(() => controller.Navigate("https://example.com/disposed"));
+    }
+
+    [Fact]
+    public async Task NativeWebView_CapturesEmbeddedSnapshot_FromOptionalProvider()
+    {
+        var backend = new TestWebViewBackend();
+        using var webView = new NativeWebViewControl(backend);
+        await webView.InitializeAsync();
+
+        var capture = webView.BeginCaptureSnapshot();
+        var snapshot = await capture.Completion;
+
+        Assert.True(capture.CaptureStarted.IsCompletedSuccessfully);
+        Assert.NotNull(snapshot);
+        Assert.Equal(
+            Convert.FromBase64String(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
+            snapshot.PngData.ToArray());
+        Assert.Equal(1, backend.SnapshotCaptureCallCount);
+    }
+
+    [Fact]
+    public async Task NativeWebView_EmbeddedSnapshot_ReturnsNull_WhenUnsupportedOrFailed()
+    {
+        var unsupportedBackend = new TestWebViewBackend(supportsSnapshot: false);
+        using var unsupported = new NativeWebViewControl(unsupportedBackend);
+        await unsupported.InitializeAsync();
+        Assert.Null(await unsupported.CaptureSnapshotAsync());
+        Assert.Equal(0, unsupportedBackend.SnapshotCaptureCallCount);
+
+        var failingBackend = new TestWebViewBackend { ThrowDuringSnapshotCapture = true };
+        using var failing = new NativeWebViewControl(failingBackend);
+        await failing.InitializeAsync();
+        Assert.Null(await failing.CaptureSnapshotAsync());
+    }
+
+    [Fact]
+    public async Task NativeWebView_BeginEmbeddedSnapshot_NormalizesAsynchronousProviderFailure()
+    {
+        var backend = new TestWebViewBackend { FailSnapshotCaptureAsynchronously = true };
+        using var webView = new NativeWebViewControl(backend);
+        await webView.InitializeAsync();
+
+        var capture = webView.BeginCaptureSnapshot();
+
+        Assert.True(capture.CaptureStarted.IsCompletedSuccessfully);
+        Assert.Null(await capture.Completion);
+    }
+
+    [Fact]
+    public async Task NativeWebView_EmbeddedSnapshot_PropagatesCancellation()
+    {
+        var backend = new TestWebViewBackend();
+        using var webView = new NativeWebViewControl(backend);
+        await webView.InitializeAsync();
+        using var cancellationSource = new CancellationTokenSource();
+        cancellationSource.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => webView.CaptureSnapshotAsync(cancellationSource.Token));
+        Assert.Equal(0, backend.SnapshotCaptureCallCount);
     }
 
     [Fact]
@@ -206,40 +392,47 @@ public sealed class ControllerOrchestrationTests
         Assert.Equal(0, backend.CallCount);
     }
 
-    private sealed class TestWebViewBackend : INativeWebViewBackend
+    private sealed class TestWebViewBackend :
+        INativeWebViewBackend,
+        INativeWebViewStatusTextProvider,
+        INativeWebViewSnapshotProvider
     {
         private readonly List<Uri> _history = [];
         private readonly int _initializeDelayMilliseconds;
         private readonly bool _allowInitializeAfterDispose;
         private readonly TaskCompletionSource<bool> _initializationStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _disposedSignal = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _historyIndex = -1;
         private bool _disposed;
 
         public TestWebViewBackend(
             int initializeDelayMilliseconds = 0,
-            bool allowInitializeAfterDispose = false)
+            bool allowInitializeAfterDispose = false,
+            bool supportsSnapshot = true)
         {
             _initializeDelayMilliseconds = initializeDelayMilliseconds;
             _allowInitializeAfterDispose = allowInitializeAfterDispose;
+            Features = new WebViewPlatformFeatures(
+                NativeWebViewPlatform.Windows,
+                NativeWebViewFeature.EmbeddedView |
+                NativeWebViewFeature.DevTools |
+                NativeWebViewFeature.ContextMenu |
+                NativeWebViewFeature.StatusBar |
+                NativeWebViewFeature.ZoomControl |
+                NativeWebViewFeature.Printing |
+                NativeWebViewFeature.PrintUi |
+                NativeWebViewFeature.WebMessageChannel |
+                NativeWebViewFeature.ScriptExecution |
+                NativeWebViewFeature.NewWindowRequestInterception |
+                NativeWebViewFeature.WebResourceRequestInterception |
+                NativeWebViewFeature.EnvironmentOptions |
+                NativeWebViewFeature.ControllerOptions |
+                (supportsSnapshot ? NativeWebViewFeature.EmbeddedSnapshotCapture : NativeWebViewFeature.None));
         }
 
         public NativeWebViewPlatform Platform => NativeWebViewPlatform.Windows;
 
-        public IWebViewPlatformFeatures Features { get; } = new WebViewPlatformFeatures(
-            NativeWebViewPlatform.Windows,
-            NativeWebViewFeature.EmbeddedView |
-            NativeWebViewFeature.DevTools |
-            NativeWebViewFeature.ContextMenu |
-            NativeWebViewFeature.StatusBar |
-            NativeWebViewFeature.ZoomControl |
-            NativeWebViewFeature.Printing |
-            NativeWebViewFeature.PrintUi |
-            NativeWebViewFeature.WebMessageChannel |
-            NativeWebViewFeature.ScriptExecution |
-            NativeWebViewFeature.NewWindowRequestInterception |
-            NativeWebViewFeature.WebResourceRequestInterception |
-            NativeWebViewFeature.EnvironmentOptions |
-            NativeWebViewFeature.ControllerOptions);
+        public IWebViewPlatformFeatures Features { get; }
 
         public Uri? CurrentUrl { get; private set; }
 
@@ -263,7 +456,19 @@ public sealed class ControllerOrchestrationTests
 
         public string? UserAgentString { get; private set; }
 
+        public string? StatusText { get; private set; }
+
         public int InitializeCallCount { get; private set; }
+
+        public int SnapshotCaptureCallCount { get; private set; }
+
+        public bool ThrowDuringSnapshotCapture { get; set; }
+
+        public bool FailSnapshotCaptureAsynchronously { get; set; }
+
+        public bool IsDisposed => _disposed;
+
+        public Task DisposedTask => _disposedSignal.Task;
 
         public event EventHandler<CoreWebViewInitializedEventArgs>? CoreWebView2Initialized;
 
@@ -296,6 +501,8 @@ public sealed class ControllerOrchestrationTests
         public event EventHandler<CoreWebViewEnvironmentRequestedEventArgs>? CoreWebView2EnvironmentRequested;
 
         public event EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? CoreWebView2ControllerOptionsRequested;
+
+        public event EventHandler<NativeWebViewStatusTextChangedEventArgs>? StatusTextChanged;
 
         public async ValueTask InitializeAsync(CancellationToken cancellationToken = default)
         {
@@ -442,6 +649,33 @@ public sealed class ControllerOrchestrationTests
             return Task.CompletedTask;
         }
 
+        public Task<NativeWebViewSnapshot?> CaptureSnapshotAsync(CancellationToken cancellationToken = default)
+        {
+            SnapshotCaptureCallCount++;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (ThrowDuringSnapshotCapture)
+                throw new InvalidOperationException("Snapshot failure.");
+            return Task.FromResult<NativeWebViewSnapshot?>(
+                new NativeWebViewSnapshot(Convert.FromBase64String(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")));
+        }
+
+        public NativeWebViewSnapshotCapture BeginCaptureSnapshot(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (FailSnapshotCaptureAsynchronously)
+            {
+                return new NativeWebViewSnapshotCapture(
+                    Task.CompletedTask,
+                    Task.FromException<NativeWebViewSnapshot?>(
+                        new InvalidOperationException("Asynchronous snapshot failure.")));
+            }
+
+            return new NativeWebViewSnapshotCapture(
+                Task.CompletedTask,
+                CaptureSnapshotAsync(cancellationToken));
+        }
+
         public void OpenDevToolsWindow()
         {
             EnsureNotDisposed();
@@ -504,6 +738,12 @@ public sealed class ControllerOrchestrationTests
             WebMessageReceived?.Invoke(this, new NativeWebViewMessageReceivedEventArgs(message, json: null));
         }
 
+        public void EmitStatusText(string? statusText)
+        {
+            StatusText = statusText;
+            StatusTextChanged?.Invoke(this, new NativeWebViewStatusTextChangedEventArgs(statusText));
+        }
+
         public void Dispose()
         {
             if (_disposed)
@@ -512,6 +752,7 @@ public sealed class ControllerOrchestrationTests
             }
 
             _disposed = true;
+            _disposedSignal.TrySetResult(true);
             DestroyRequested?.Invoke(this, new NativeWebViewDestroyRequestedEventArgs("Disposed"));
         }
 

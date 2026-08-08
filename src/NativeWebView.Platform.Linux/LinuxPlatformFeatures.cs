@@ -27,5 +27,7 @@ internal static class LinuxPlatformFeatures
         NativeWebViewFeature.ProxyConfiguration |
         NativeWebViewFeature.Favicon |
         NativeWebViewFeature.Downloads |
-        NativeWebViewFeature.DocumentStartScriptInjection);
+        NativeWebViewFeature.DocumentStartScriptInjection |
+        NativeWebViewFeature.StatusText |
+        NativeWebViewFeature.EmbeddedSnapshotCapture);
 }

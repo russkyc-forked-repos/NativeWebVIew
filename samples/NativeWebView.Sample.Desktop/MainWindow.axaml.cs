@@ -333,6 +333,9 @@ public partial class MainWindow : Window
             _ = RefreshFaviconAsync("FaviconChanged");
         };
 
+        WebViewControl.StatusTextChanged += (_, e) =>
+            AddLog($"StatusTextChanged: {e.StatusText ?? "<null>"}");
+
         WebViewControl.CoreWebView2EnvironmentRequested += (_, e) =>
         {
             e.Options.Language ??= "en-US";
@@ -1519,6 +1522,17 @@ public partial class MainWindow : Window
                 $"id={frame.FrameId}, utc={frame.CapturedAtUtc:O}, mode={frame.RenderMode}, origin={frame.Origin}, " +
                 $"{frame.PixelWidth}x{frame.PixelHeight}, bytesPerRow={frame.BytesPerRow}, synthetic={frame.IsSynthetic}";
             AddLog($"Captured frame: {_lastCapturedFrameInfo}");
+        });
+    }
+
+    private async void CaptureEmbeddedSnapshotMenuItemOnClick(object? sender, RoutedEventArgs e)
+    {
+        await RunWebViewActionAsync("CaptureSnapshotAsync", async () =>
+        {
+            var snapshot = await WebViewControl.CaptureSnapshotAsync();
+            AddLog(snapshot is null
+                ? "CaptureSnapshotAsync returned no snapshot."
+                : $"Captured embedded PNG snapshot ({snapshot.PngData.Length} bytes).");
         });
     }
 
