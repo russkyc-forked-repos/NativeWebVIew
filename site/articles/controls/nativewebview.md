@@ -58,6 +58,7 @@ Companion surfaces are available when embedding is not the right fit: [`NativeWe
 ## Main Events
 
 - Initialization: `CoreWebView2Initialized`, `CoreWebView2EnvironmentRequested`, `CoreWebView2ControllerOptionsRequested`
+- Browser state: `StatusTextChanged`, `ZoomFactorChanged`, `FaviconChanged`
 - Navigation: `NavigationStarted`, `NavigationCompleted`, `NavigationHistoryChanged`
 - Favicons: `FaviconChanged`
 - Downloads: `DownloadStarting`, `DownloadStarted`, `DownloadChanged`, `DownloadCompleted`

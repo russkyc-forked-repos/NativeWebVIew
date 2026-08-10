@@ -14,6 +14,7 @@ internal static class BrowserPlatformFeatures
         NativeWebViewFeature.NativePlatformHandle |
         NativeWebViewFeature.CookieManager |
         NativeWebViewFeature.CommandManager |
+        NativeWebViewFeature.ZoomControl |
         NativeWebViewFeature.ScriptExecution |
         NativeWebViewFeature.WebMessageChannel |
         NativeWebViewFeature.GpuSurfaceRendering |

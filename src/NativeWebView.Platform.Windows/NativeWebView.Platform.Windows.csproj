@@ -16,8 +16,22 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Web.WebView2">
+    <PackageReference Include="Microsoft.Web.WebView2" GeneratePathProperty="true">
       <PrivateAssets>buildTransitive</PrivateAssets>
     </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      WebView2 keeps its managed runtime bridge outside NuGet's normal runtime
+      asset folders and supplies it through buildTransitive targets. Importing
+      those targets in consumers also adds the optional WPF and WinForms
+      assemblies. Package only the Core bridge as a Windows runtime asset so
+      applications receive everything the backend requires without acquiring
+      UI-framework references or a direct WebView2 package reference.
+    -->
+    <None Include="$(PkgMicrosoft_Web_WebView2)/lib_manual/netcoreapp3.0/Microsoft.Web.WebView2.Core.dll"
+          Pack="true"
+          PackagePath="runtimes/win/lib/net10.0/" />
   </ItemGroup>
 </Project>

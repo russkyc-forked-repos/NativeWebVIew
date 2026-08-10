@@ -29,5 +29,6 @@ internal static class LinuxPlatformFeatures
         NativeWebViewFeature.Downloads |
         NativeWebViewFeature.DocumentStartScriptInjection |
         NativeWebViewFeature.StatusText |
-        NativeWebViewFeature.EmbeddedSnapshotCapture);
+        NativeWebViewFeature.EmbeddedSnapshotCapture |
+        NativeWebViewFeature.ZoomFactorChangeNotification);
 }
