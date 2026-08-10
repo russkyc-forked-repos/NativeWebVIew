@@ -313,8 +313,10 @@ public partial class MainWindow : Window
         WebViewControl.WebResourceRequested += (_, e) =>
             AddLog($"WebResourceRequested: method={e.Method}, uri={e.Uri}");
 
-        WebViewControl.ContextMenuRequested += (_, e) =>
-            AddLog($"ContextMenuRequested: x={e.X:0.##}, y={e.Y:0.##}");
+        WebViewControl.ContextMenuRequested += (sender, e) =>
+            AddLog(
+                $"ContextMenuRequested: senderIsControl={ReferenceEquals(sender, WebViewControl)}, " +
+                $"x={e.X:0.##}, y={e.Y:0.##}");
 
         WebViewControl.NavigationHistoryChanged += (_, e) =>
             AddLog($"NavigationHistoryChanged: canGoBack={e.CanGoBack}, canGoForward={e.CanGoForward}");

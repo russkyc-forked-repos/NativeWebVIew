@@ -140,9 +140,12 @@ public sealed class NativeWebViewController : IDisposable
 
     public event EventHandler<NativeWebViewResourceRequestedEventArgs>? WebResourceRequested;
 
+    /// <summary>Occurs synchronously when the backend is preparing a context menu.</summary>
+    /// <remarks>The event sender is this controller.</remarks>
     public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested;
 
     /// <summary>Occurs when an application-provided native context-menu command is selected.</summary>
+    /// <remarks>The event sender is this controller.</remarks>
     public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
 
     public event EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? NavigationHistoryChanged;

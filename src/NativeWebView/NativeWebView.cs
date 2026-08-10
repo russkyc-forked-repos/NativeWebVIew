@@ -299,6 +299,12 @@ public class NativeWebView : NativeControlHost, IDisposable
         remove => _webResourceRequested -= value;
     }
 
+    /// <summary>Occurs synchronously when the native browser is preparing a context menu.</summary>
+    /// <remarks>
+    /// The event sender is this <see cref="NativeWebView"/> control, including when the control is
+    /// subclassed. Handlers must update <see cref="NativeWebViewContextMenuRequestedEventArgs.AdditionalItems"/>
+    /// or <see cref="NativeWebViewContextMenuRequestedEventArgs.Handled"/> before returning.
+    /// </remarks>
     public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested
     {
         add => _contextMenuRequested += value;
@@ -306,6 +312,9 @@ public class NativeWebView : NativeControlHost, IDisposable
     }
 
     /// <summary>Occurs when an application-provided native context-menu command is selected.</summary>
+    /// <remarks>
+    /// The event sender is this <see cref="NativeWebView"/> control, including when the control is subclassed.
+    /// </remarks>
     public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked
     {
         add => _contextMenuCommandInvoked += value;
@@ -744,8 +753,11 @@ public class NativeWebView : NativeControlHost, IDisposable
     private void ForwardWebResourceRequested(object? sender, NativeWebViewResourceRequestedEventArgs e) =>
         _webResourceRequested?.Invoke(sender, e);
 
-    private void ForwardContextMenuRequested(object? sender, NativeWebViewContextMenuRequestedEventArgs e) =>
-        _contextMenuRequested?.Invoke(sender, e);
+    private void ForwardContextMenuRequested(object? sender, NativeWebViewContextMenuRequestedEventArgs e)
+    {
+        _ = sender;
+        _contextMenuRequested?.Invoke(this, e);
+    }
 
     private void ForwardContextMenuCommandInvoked(object? sender, NativeWebViewContextMenuCommandInvokedEventArgs e)
     {
