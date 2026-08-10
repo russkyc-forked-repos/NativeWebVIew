@@ -1,11 +1,18 @@
 using NativeWebView.Core;
+using Microsoft.Web.WebView2.Core;
 
 namespace NativeWebView.Platform.Windows;
 
 internal static class WindowsPlatformDiagnostics
 {
+    private static readonly Uri RuntimeInstallerUri = new("https://go.microsoft.com/fwlink/p/?LinkId=2124703");
+
     public static NativeWebViewPlatformDiagnostics Create()
+        => Create(static () => CoreWebView2Environment.GetAvailableBrowserVersionString());
+
+    internal static NativeWebViewPlatformDiagnostics Create(Func<string?> runtimeVersionProvider)
     {
+        ArgumentNullException.ThrowIfNull(runtimeVersionProvider);
         var issues = new List<NativeWebViewDiagnosticIssue>();
         AddContractOnlyControlWarning(issues);
 
@@ -26,6 +33,18 @@ internal static class WindowsPlatformDiagnostics
                     severity: NativeWebViewDiagnosticSeverity.Error,
                     message: "Windows 10 or newer is required.",
                     recommendation: "Upgrade the host OS to Windows 10+."));
+            }
+
+            else if (!IsRuntimeAvailable(runtimeVersionProvider))
+            {
+                issues.Add(new NativeWebViewDiagnosticIssue(
+                    code: "windows.runtime.unavailable",
+                    severity: NativeWebViewDiagnosticSeverity.Error,
+                    message: "The Windows web runtime is not installed or cannot be loaded.",
+                    recommendation: "Install or repair the Windows web runtime.",
+                    remediation: new NativeWebViewDiagnosticRemediation(
+                        NativeWebViewDiagnosticRemediationKind.InstallRuntime,
+                        RuntimeInstallerUri)));
             }
 
             var runtimePath = Environment.GetEnvironmentVariable("NATIVEWEBVIEW_WEBVIEW2_RUNTIME_PATH");
@@ -51,6 +70,18 @@ internal static class WindowsPlatformDiagnostics
             NativeWebViewPlatform.Windows,
             providerName: nameof(WindowsPlatformDiagnostics),
             issues);
+    }
+
+    private static bool IsRuntimeAvailable(Func<string?> runtimeVersionProvider)
+    {
+        try
+        {
+            return !string.IsNullOrWhiteSpace(runtimeVersionProvider());
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static void AddContractOnlyControlWarning(List<NativeWebViewDiagnosticIssue> issues)

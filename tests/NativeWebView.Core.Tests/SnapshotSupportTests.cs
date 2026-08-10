@@ -123,6 +123,21 @@ public sealed class SnapshotSupportTests
         Assert.IsAssignableFrom<INativeWebViewStatusTextProvider>(linux);
     }
 
+    [Fact]
+    public void NativeZoomNotificationCapability_IsAvailableOnDesktopBackends()
+    {
+        using var windows = new WindowsNativeWebViewBackend();
+        using var linux = new LinuxNativeWebViewBackend();
+        using var macOS = new MacOSNativeWebViewBackend();
+
+        Assert.True(windows.Features.Supports(NativeWebViewFeature.ZoomFactorChangeNotification));
+        Assert.True(linux.Features.Supports(NativeWebViewFeature.ZoomFactorChangeNotification));
+        Assert.True(macOS.Features.Supports(NativeWebViewFeature.ZoomFactorChangeNotification));
+        Assert.IsAssignableFrom<INativeWebViewZoomFactorProvider>(windows);
+        Assert.IsAssignableFrom<INativeWebViewZoomFactorProvider>(linux);
+        Assert.IsAssignableFrom<INativeWebViewZoomFactorProvider>(macOS);
+    }
+
     [Theory]
     [InlineData(false, 7, 7, true, true)]
     [InlineData(true, 7, 7, true, false)]

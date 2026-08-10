@@ -34,5 +34,6 @@ internal static class WindowsPlatformFeatures
         NativeWebViewFeature.Downloads |
         NativeWebViewFeature.DocumentStartScriptInjection |
         NativeWebViewFeature.StatusText |
-        NativeWebViewFeature.EmbeddedSnapshotCapture);
+        NativeWebViewFeature.EmbeddedSnapshotCapture |
+        NativeWebViewFeature.ZoomFactorChangeNotification);
 }

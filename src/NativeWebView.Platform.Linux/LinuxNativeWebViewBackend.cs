@@ -14,6 +14,7 @@ public sealed class LinuxNativeWebViewBackend
       INativeWebViewFaviconProvider,
       INativeWebViewSnapshotProvider,
       INativeWebViewStatusTextProvider,
+      INativeWebViewZoomFactorProvider,
       INativeWebViewContextMenuBackend
 {
     private static readonly NativePlatformHandle PlaceholderPlatformHandle = new(0x3001, "XID");
@@ -233,6 +234,8 @@ public sealed class LinuxNativeWebViewBackend
     public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
 
     public event EventHandler<NativeWebViewStatusTextChangedEventArgs>? StatusTextChanged;
+
+    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
     public event EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? NavigationHistoryChanged;
 
@@ -651,12 +654,12 @@ public sealed class LinuxNativeWebViewBackend
     {
         EnsureNotDisposed();
 
-        if (zoomFactor <= 0)
+        if (!NativeWebViewZoomFactor.IsValid(zoomFactor))
         {
-            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be finite and greater than zero.");
         }
 
-        _zoomFactor = zoomFactor;
+        UpdateZoomFactor(zoomFactor);
         if (IsRuntimeReady())
         {
             _ = LinuxGtkDispatcher.InvokeAsync(() => LinuxNativeInterop.webkit_web_view_set_zoom_level(_webView, zoomFactor));
@@ -1339,9 +1342,7 @@ public sealed class LinuxNativeWebViewBackend
         }
 
         var isPrivateMode = _preparedControllerOptions?.IsInPrivateModeEnabled == true;
-        _webContext = isPrivateMode
-            ? LinuxNativeInterop.webkit_web_context_new_ephemeral()
-            : LinuxNativeInterop.webkit_web_context_new();
+        _webContext = CreateWebContextOnGtkThread(_preparedEnvironmentOptions, isPrivateMode);
 
         if (_webContext == IntPtr.Zero)
         {
@@ -1428,6 +1429,7 @@ public sealed class LinuxNativeWebViewBackend
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "close", new LinuxNativeInterop.CloseSignal(OnCloseRequested)));
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "context-menu", new LinuxNativeInterop.ContextMenuSignal(OnContextMenu)));
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "mouse-target-changed", new LinuxNativeInterop.MouseTargetChangedSignal(OnMouseTargetChanged)));
+        _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_webView, "notify::zoom-level", new LinuxNativeInterop.NotifySignal(OnZoomLevelChanged)));
         _signalSubscriptions.Add(LinuxNativeInterop.ConnectSignal(_userContentManager, $"script-message-received::{ScriptMessageHandlerName}", new LinuxNativeInterop.ScriptMessageReceivedSignal(OnScriptMessageReceived)));
 
         LinuxNativeInterop.gtk_container_add(_gtkWindow, _webView);
@@ -1436,6 +1438,78 @@ public sealed class LinuxNativeWebViewBackend
         SyncNavigationSnapshotFromRuntimeOnGtkThread(updatePendingNavigation: false);
 
     }
+
+    [SupportedOSPlatform("linux")]
+    private static nint CreateWebContextOnGtkThread(
+        NativeWebViewEnvironmentOptions? options,
+        bool isPrivateMode)
+    {
+        if (isPrivateMode)
+            return LinuxNativeInterop.webkit_web_context_new_ephemeral();
+
+        var storage = ResolvePersistentStorageConfiguration(options);
+        if (storage is null)
+            return LinuxNativeInterop.webkit_web_context_new();
+
+        if (storage.BaseDataDirectory is not null)
+            Directory.CreateDirectory(storage.BaseDataDirectory);
+        if (storage.BaseCacheDirectory is not null)
+            Directory.CreateDirectory(storage.BaseCacheDirectory);
+
+        nint websiteDataManager;
+        if (storage is { BaseDataDirectory: not null, BaseCacheDirectory: not null })
+        {
+            websiteDataManager = LinuxNativeInterop.webkit_website_data_manager_new_with_two_directories(
+                "base-data-directory",
+                storage.BaseDataDirectory,
+                "base-cache-directory",
+                storage.BaseCacheDirectory,
+                IntPtr.Zero);
+        }
+        else if (storage.BaseDataDirectory is not null)
+        {
+            websiteDataManager = LinuxNativeInterop.webkit_website_data_manager_new_with_one_directory(
+                "base-data-directory",
+                storage.BaseDataDirectory,
+                IntPtr.Zero);
+        }
+        else
+        {
+            websiteDataManager = LinuxNativeInterop.webkit_website_data_manager_new_with_one_directory(
+                "base-cache-directory",
+                storage.BaseCacheDirectory!,
+                IntPtr.Zero);
+        }
+
+        if (websiteDataManager == IntPtr.Zero)
+            throw new InvalidOperationException("Unable to create a persistent WebKitGTK website data manager.");
+
+        try
+        {
+            return LinuxNativeInterop.webkit_web_context_new_with_website_data_manager(websiteDataManager);
+        }
+        finally
+        {
+            LinuxNativeInterop.g_object_unref(websiteDataManager);
+        }
+    }
+
+    internal static LinuxPersistentStorageConfiguration? ResolvePersistentStorageConfiguration(
+        NativeWebViewEnvironmentOptions? options)
+    {
+        if (options is null)
+            return null;
+
+        var baseDataDirectory = NormalizeStorageDirectory(options.UserDataFolder) ??
+                                NormalizeStorageDirectory(options.SessionDataFolder);
+        var baseCacheDirectory = NormalizeStorageDirectory(options.CacheFolder);
+        return baseDataDirectory is null && baseCacheDirectory is null
+            ? null
+            : new LinuxPersistentStorageConfiguration(baseDataDirectory, baseCacheDirectory);
+    }
+
+    private static string? NormalizeStorageDirectory(string? path) =>
+        string.IsNullOrWhiteSpace(path) ? null : Path.GetFullPath(path);
 
     [SupportedOSPlatform("linux")]
     private void RollbackRuntimeInitializationOnGtkThread()
@@ -1720,6 +1794,24 @@ public sealed class LinuxNativeWebViewBackend
     internal static bool CanAcceptMouseStatus(bool isDisposed, bool isRuntimeInitialized) =>
         !isDisposed && isRuntimeInitialized;
 
+    [SupportedOSPlatform("linux")]
+    private void OnZoomLevelChanged(IntPtr instance, IntPtr parameterSpec, IntPtr userData)
+    {
+        _ = parameterSpec;
+        _ = userData;
+        try
+        {
+            if (_disposed || !Volatile.Read(ref _isRuntimeInitialized) || instance == IntPtr.Zero)
+                return;
+
+            UpdateZoomFactor(LinuxNativeInterop.webkit_web_view_get_zoom_level(instance));
+        }
+        catch
+        {
+            // Managed exceptions must never cross the native GTK callback boundary.
+        }
+    }
+
     private readonly record struct PendingRuntimeNavigation(
         Uri? Uri,
         int Version,
@@ -1733,6 +1825,15 @@ public sealed class LinuxNativeWebViewBackend
 
         _statusText = normalized;
         StatusTextChanged?.Invoke(this, new NativeWebViewStatusTextChangedEventArgs(normalized));
+    }
+
+    private void UpdateZoomFactor(double zoomFactor)
+    {
+        if (_disposed || !NativeWebViewZoomFactor.HasChanged(_zoomFactor, zoomFactor))
+            return;
+
+        _zoomFactor = zoomFactor;
+        ZoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
     }
 
     private void OnDownloadStarted(IntPtr context, IntPtr download, IntPtr userData)
@@ -2163,6 +2264,10 @@ public sealed class LinuxNativeWebViewBackend
 
         return Path.Combine(fullPath, "cookies.sqlite");
     }
+
+    internal sealed record LinuxPersistentStorageConfiguration(
+        string? BaseDataDirectory,
+        string? BaseCacheDirectory);
 
     private static Uri? TryCreateUri(string? uri)
     {

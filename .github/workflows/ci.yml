@@ -155,6 +155,9 @@ jobs:
       - name: Validate package artifacts
         run: bash ./scripts/validate-nuget-packages.sh --package-dir artifacts/packages --markdown-output artifacts/packages/package-validation.md
 
+      - name: Validate Windows package consumer
+        run: bash ./scripts/validate-windows-package-consumer.sh --package-dir artifacts/packages
+
       - name: Publish package summary
         if: always()
         run: |
