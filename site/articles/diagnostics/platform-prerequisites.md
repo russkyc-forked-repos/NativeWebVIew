@@ -26,10 +26,6 @@ if (!diagnostics.IsReady)
 foreach (var issue in diagnostics.Issues)
 {
     Console.WriteLine($"{issue.Severity}: {issue.Code} - {issue.Message}");
-    if (issue.Remediation is { Kind: NativeWebViewDiagnosticRemediationKind.InstallRuntime } remediation)
-    {
-        Console.WriteLine($"Install the required runtime from {remediation.Uri}");
-    }
 }
 ```
 

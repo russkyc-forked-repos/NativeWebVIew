@@ -335,8 +335,6 @@ public partial class MainWindow : Window
 
         WebViewControl.StatusTextChanged += (_, e) =>
             AddLog($"StatusTextChanged: {e.StatusText ?? "<null>"}");
-        WebViewControl.ZoomFactorChanged += (_, e) =>
-            AddLog($"ZoomFactorChanged: {e.ZoomFactor.ToString(CultureInfo.InvariantCulture)}");
 
         WebViewControl.CoreWebView2EnvironmentRequested += (_, e) =>
         {

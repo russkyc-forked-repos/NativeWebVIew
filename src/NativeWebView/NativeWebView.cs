@@ -83,10 +83,7 @@ public class NativeWebView : NativeControlHost, IDisposable
     private EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? _coreWebView2ControllerOptionsRequested;
     private EventHandler<NativeWebViewFaviconChangedEventArgs>? _faviconChanged;
     private EventHandler<NativeWebViewStatusTextChangedEventArgs>? _statusTextChanged;
-    private EventHandler<NativeWebViewZoomFactorChangedEventArgs>? _zoomFactorChanged;
     private readonly NativeWebViewStatusDispatchQueue _statusTextDispatchQueue = new();
-    private double _lastZoomFactor;
-    private int _zoomDispatchGeneration;
 
     public static readonly StyledProperty<NativeWebViewRenderMode> RenderModeProperty =
         AvaloniaProperty.Register<NativeWebView, NativeWebViewRenderMode>(nameof(RenderMode), NativeWebViewRenderMode.Embedded);
@@ -124,7 +121,6 @@ public class NativeWebView : NativeControlHost, IDisposable
         _instance = instance ?? throw new ArgumentNullException(nameof(instance));
         _ownsInstance = ownsInstance;
         _controller = _instance.Controller;
-        _lastZoomFactor = _controller.ZoomFactor;
         _macOSHost = _instance.MacOSHost;
         Focusable = true;
         _controller.CoreWebView2EnvironmentRequested += OnCoreWebView2EnvironmentRequestedInternal;
@@ -217,7 +213,7 @@ public class NativeWebView : NativeControlHost, IDisposable
         set => _controller.IsZoomControlEnabled = value;
     }
 
-    public double ZoomFactor => _macOSHost?.ZoomFactor ?? _controller.ZoomFactor;
+    public double ZoomFactor => _controller.ZoomFactor;
 
     public string? HeaderString => _controller.HeaderString;
 
@@ -365,13 +361,6 @@ public class NativeWebView : NativeControlHost, IDisposable
     {
         add => _statusTextChanged += value;
         remove => _statusTextChanged -= value;
-    }
-
-    /// <summary>Occurs when the effective zoom factor changes.</summary>
-    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged
-    {
-        add => _zoomFactorChanged += value;
-        remove => _zoomFactorChanged -= value;
     }
 
     public event EventHandler<NativeWebViewRenderFrameCapturedEventArgs>? RenderFrameCaptured;
@@ -535,7 +524,6 @@ public class NativeWebView : NativeControlHost, IDisposable
 
     private void AttachControllerEventForwarders()
     {
-        Interlocked.Increment(ref _zoomDispatchGeneration);
         _controller.CoreWebView2Initialized += ForwardCoreWebView2Initialized;
         _controller.NavigationStarted += ForwardNavigationStarted;
         _controller.NavigationCompleted += ForwardNavigationCompleted;
@@ -559,12 +547,10 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.CoreWebView2ControllerOptionsRequested += ForwardCoreWebView2ControllerOptionsRequested;
         _controller.FaviconChanged += ForwardFaviconChanged;
         _controller.StatusTextChanged += ForwardStatusTextChanged;
-        _controller.ZoomFactorChanged += ForwardZoomFactorChanged;
     }
 
     private void DetachControllerEventForwarders()
     {
-        Interlocked.Increment(ref _zoomDispatchGeneration);
         _controller.CoreWebView2Initialized -= ForwardCoreWebView2Initialized;
         _controller.NavigationStarted -= ForwardNavigationStarted;
         _controller.NavigationCompleted -= ForwardNavigationCompleted;
@@ -588,7 +574,6 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.CoreWebView2ControllerOptionsRequested -= ForwardCoreWebView2ControllerOptionsRequested;
         _controller.FaviconChanged -= ForwardFaviconChanged;
         _controller.StatusTextChanged -= ForwardStatusTextChanged;
-        _controller.ZoomFactorChanged -= ForwardZoomFactorChanged;
     }
 
     private void AttachMacOSHostEventForwarders()
@@ -596,7 +581,6 @@ public class NativeWebView : NativeControlHost, IDisposable
         if (_macOSHost is null || _macOSHostEventForwardersAttached)
             return;
 
-        Interlocked.Increment(ref _zoomDispatchGeneration);
         _macOSHost.NavigationStarted += ForwardNavigationStarted;
         _macOSHost.NavigationCompleted += ForwardNavigationCompleted;
         _macOSHost.NavigationHistoryChanged += ForwardNavigationHistoryChanged;
@@ -605,7 +589,6 @@ public class NativeWebView : NativeControlHost, IDisposable
         _macOSHost.ContextMenuCommandInvoked += ForwardContextMenuCommandInvoked;
         _macOSHost.WebMessageReceived += ForwardWebMessageReceived;
         _macOSHost.NativeFocusRequested += ForwardMacOSNativeFocusRequested;
-        _macOSHost.ZoomFactorChanged += ForwardZoomFactorChanged;
         _macOSHostEventForwardersAttached = true;
     }
 
@@ -614,7 +597,6 @@ public class NativeWebView : NativeControlHost, IDisposable
         if (_macOSHost is null || !_macOSHostEventForwardersAttached)
             return;
 
-        Interlocked.Increment(ref _zoomDispatchGeneration);
         _macOSHost.NavigationStarted -= ForwardNavigationStarted;
         _macOSHost.NavigationCompleted -= ForwardNavigationCompleted;
         _macOSHost.NavigationHistoryChanged -= ForwardNavigationHistoryChanged;
@@ -623,7 +605,6 @@ public class NativeWebView : NativeControlHost, IDisposable
         _macOSHost.ContextMenuCommandInvoked -= ForwardContextMenuCommandInvoked;
         _macOSHost.WebMessageReceived -= ForwardWebMessageReceived;
         _macOSHost.NativeFocusRequested -= ForwardMacOSNativeFocusRequested;
-        _macOSHost.ZoomFactorChanged -= ForwardZoomFactorChanged;
         _macOSHostEventForwardersAttached = false;
     }
 
@@ -671,32 +652,6 @@ public class NativeWebView : NativeControlHost, IDisposable
                     _statusTextChanged?.Invoke(this, notification);
             },
             DispatcherPriority.Normal);
-    }
-
-    private void ForwardZoomFactorChanged(object? sender, NativeWebViewZoomFactorChangedEventArgs e)
-    {
-        _ = sender;
-        var generation = Volatile.Read(ref _zoomDispatchGeneration);
-        if (Dispatcher.UIThread.CheckAccess())
-        {
-            PublishZoomFactor(e.ZoomFactor, generation);
-            return;
-        }
-
-        Dispatcher.UIThread.Post(
-            () => PublishZoomFactor(e.ZoomFactor, generation),
-            DispatcherPriority.Normal);
-    }
-
-    private void PublishZoomFactor(double zoomFactor, int generation)
-    {
-        if (_isDisposed ||
-            generation != Volatile.Read(ref _zoomDispatchGeneration) ||
-            !NativeWebViewZoomFactor.HasChanged(_lastZoomFactor, zoomFactor))
-            return;
-
-        _lastZoomFactor = zoomFactor;
-        _zoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
     }
 
     private void ForwardOpenDevToolsRequested(object? sender, NativeWebViewOpenDevToolsRequestedEventArgs e) =>

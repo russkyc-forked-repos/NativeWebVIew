@@ -19,7 +19,6 @@ public sealed class WindowsNativeWebViewBackend
       INativeWebViewFaviconProvider,
       INativeWebViewSnapshotProvider,
       INativeWebViewStatusTextProvider,
-      INativeWebViewZoomFactorProvider,
       INativeWebViewContextMenuBackend
 {
     private const string ContextMenuCaptureScript = """
@@ -223,8 +222,6 @@ public sealed class WindowsNativeWebViewBackend
     public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
 
     public event EventHandler<NativeWebViewStatusTextChangedEventArgs>? StatusTextChanged;
-
-    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
     public event EventHandler<NativeWebViewNavigationHistoryChangedEventArgs>? NavigationHistoryChanged;
 
@@ -643,12 +640,12 @@ public sealed class WindowsNativeWebViewBackend
     {
         EnsureNotDisposed();
 
-        if (!NativeWebViewZoomFactor.IsValid(zoomFactor))
+        if (zoomFactor <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be finite and greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be greater than zero.");
         }
 
-        UpdateZoomFactor(zoomFactor);
+        _zoomFactor = zoomFactor;
 
         if (IsRuntimeReady())
         {
@@ -1871,17 +1868,8 @@ public sealed class WindowsNativeWebViewBackend
     {
         if (_controller is not null)
         {
-            UpdateZoomFactor(_controller.ZoomFactor);
+            _zoomFactor = _controller.ZoomFactor;
         }
-    }
-
-    private void UpdateZoomFactor(double zoomFactor)
-    {
-        if (_disposed || !NativeWebViewZoomFactor.HasChanged(_zoomFactor, zoomFactor))
-            return;
-
-        _zoomFactor = zoomFactor;
-        ZoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
     }
 
     private void OnNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)

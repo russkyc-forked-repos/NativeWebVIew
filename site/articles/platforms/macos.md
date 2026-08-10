@@ -45,7 +45,6 @@ macOS supports composited hosting paths and passthrough decisions for scenarios 
 
 - Per-instance proxy application is implemented for `NativeWebView` and `NativeWebDialog` on `macOS 14+`.
 - The current runtime path uses a dedicated persistent `WKWebsiteDataStore` identity derived from the instance configuration.
-- Private mode uses a non-persistent `WKWebsiteDataStore`. Explicit profile names or storage paths use a dedicated persistent identity and therefore require macOS 14+.
 - Explicit `http`, `https`, and `socks5` proxy servers plus bypass domains are supported.
 - PAC (`AutoConfigUrl`) is not applied by the current macOS integration.
 

@@ -117,7 +117,7 @@ dependency_checks=(
   "NativeWebView.Dialog:NativeWebView.Core NativeWebView.Interop"
   "NativeWebView.Auth:NativeWebView.Core"
   "NativeWebView.Interop:NativeWebView.Core"
-  "NativeWebView.Platform.Windows:NativeWebView.Core NativeWebView.Interop Microsoft.Web.WebView2"
+  "NativeWebView.Platform.Windows:NativeWebView.Core NativeWebView.Interop"
   "NativeWebView.Platform.macOS:NativeWebView.Core NativeWebView.Interop"
   "NativeWebView.Platform.Linux:NativeWebView.Core NativeWebView.Interop"
   "NativeWebView.Platform.iOS:NativeWebView.Core NativeWebView.Interop"

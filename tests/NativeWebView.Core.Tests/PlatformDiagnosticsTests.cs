@@ -81,41 +81,6 @@ public sealed class PlatformDiagnosticsTests
     }
 
     [Fact]
-    public void DiagnosticRemediation_RequiresAnAbsoluteUri()
-    {
-        Assert.Throws<ArgumentException>(() => new NativeWebViewDiagnosticRemediation(
-            NativeWebViewDiagnosticRemediationKind.InstallRuntime,
-            new Uri("relative", UriKind.Relative)));
-
-        var remediation = new NativeWebViewDiagnosticRemediation(
-            NativeWebViewDiagnosticRemediationKind.InstallRuntime,
-            new Uri("https://example.test/runtime"));
-        var issue = new NativeWebViewDiagnosticIssue(
-            "runtime.missing",
-            NativeWebViewDiagnosticSeverity.Error,
-            "Runtime missing.",
-            "Install it.",
-            remediation);
-
-        Assert.Same(remediation, issue.Remediation);
-        Assert.Equal(NativeWebViewDiagnosticRemediationKind.InstallRuntime, remediation.Kind);
-        Assert.True(remediation.Uri.IsAbsoluteUri);
-    }
-
-    [Fact]
-    public void WindowsDiagnostics_MissingRuntime_ProvidesNeutralInstallRemediation()
-    {
-        if (!OperatingSystem.IsWindows())
-            return;
-
-        var diagnostics = WindowsPlatformDiagnostics.Create(static () => null);
-        var issue = Assert.Single(diagnostics.Issues, static candidate => candidate.Code == "windows.runtime.unavailable");
-
-        Assert.Equal(NativeWebViewDiagnosticRemediationKind.InstallRuntime, issue.Remediation?.Kind);
-        Assert.True(issue.Remediation?.Uri.IsAbsoluteUri);
-    }
-
-    [Fact]
     public void Runtime_CurrentPlatformDiagnostics_AreAvailable()
     {
         var diagnostics = NativeWebViewRuntime.GetCurrentPlatformDiagnostics();

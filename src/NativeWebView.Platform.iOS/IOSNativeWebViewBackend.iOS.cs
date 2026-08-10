@@ -21,8 +21,7 @@ public sealed class IOSNativeWebViewBackend
       INativeWebViewPlatformHandleProvider,
       INativeWebViewInstanceConfigurationTarget,
       INativeWebViewNativeControlAttachment,
-      INativeWebViewFaviconProvider,
-      INativeWebViewZoomFactorProvider
+      INativeWebViewFaviconProvider
 {
     private const string ScriptMessageHandlerName = "nativewebview";
 
@@ -248,8 +247,6 @@ public sealed class IOSNativeWebViewBackend
     public event EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? CoreWebView2ControllerOptionsRequested;
 
     public event EventHandler<NativeWebViewFaviconChangedEventArgs>? FaviconChanged;
-
-    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
     public void ApplyInstanceConfiguration(NativeWebViewInstanceConfiguration configuration)
     {
@@ -522,13 +519,7 @@ public sealed class IOSNativeWebViewBackend
     public void SetZoomFactor(double zoomFactor)
     {
         EnsureNotDisposed();
-        if (!NativeWebViewZoomFactor.IsValid(zoomFactor))
-            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be finite and greater than zero.");
-        if (!NativeWebViewZoomFactor.HasChanged(_zoomFactor, zoomFactor))
-            return;
-
-        _zoomFactor = zoomFactor;
-        ZoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
+        _zoomFactor = zoomFactor > 0 ? zoomFactor : 1.0;
 
         if (_webView is not null)
         {

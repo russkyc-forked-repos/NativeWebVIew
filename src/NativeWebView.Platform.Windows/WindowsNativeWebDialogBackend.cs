@@ -5,7 +5,7 @@ using NativeWebView.Interop;
 
 namespace NativeWebView.Platform.Windows;
 
-public sealed class WindowsNativeWebDialogBackend : INativeWebDialogBackend, INativeWebDialogPlatformHandleProvider, INativeWebViewInstanceConfigurationTarget, INativeWebViewZoomFactorProvider
+public sealed class WindowsNativeWebDialogBackend : INativeWebDialogBackend, INativeWebDialogPlatformHandleProvider, INativeWebViewInstanceConfigurationTarget
 {
     private static readonly NativePlatformHandle PlaceholderPlatformHandle = new((nint)0x1101, "HWND");
     private static readonly NativePlatformHandle PlaceholderDialogHandle = new((nint)0x1102, "ICoreWebView2");
@@ -38,7 +38,6 @@ public sealed class WindowsNativeWebDialogBackend : INativeWebDialogBackend, INa
         _backend.WebResourceRequested += OnWebResourceRequested;
         _backend.ContextMenuRequested += OnContextMenuRequested;
         _backend.DestroyRequested += OnDestroyRequested;
-        _backend.ZoomFactorChanged += OnZoomFactorChanged;
     }
 
     public NativeWebViewPlatform Platform { get; }
@@ -114,8 +113,6 @@ public sealed class WindowsNativeWebDialogBackend : INativeWebDialogBackend, INa
     public event EventHandler<NativeWebViewResourceRequestedEventArgs>? WebResourceRequested;
 
     public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested;
-
-    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
     public void ApplyInstanceConfiguration(NativeWebViewInstanceConfiguration configuration)
     {
@@ -352,14 +349,7 @@ public sealed class WindowsNativeWebDialogBackend : INativeWebDialogBackend, INa
         _backend.WebResourceRequested -= OnWebResourceRequested;
         _backend.ContextMenuRequested -= OnContextMenuRequested;
         _backend.DestroyRequested -= OnDestroyRequested;
-        _backend.ZoomFactorChanged -= OnZoomFactorChanged;
         _backend.Dispose();
-    }
-
-    private void OnZoomFactorChanged(object? sender, NativeWebViewZoomFactorChangedEventArgs e)
-    {
-        _ = sender;
-        ZoomFactorChanged?.Invoke(this, e);
     }
 
     private static IntPtr WindowProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam)

@@ -7,7 +7,7 @@ using NativeWebView.Interop;
 
 namespace NativeWebView.Platform.macOS;
 
-public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INativeWebDialogPlatformHandleProvider, INativeWebViewInstanceConfigurationTarget, INativeWebViewZoomFactorProvider
+public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INativeWebDialogPlatformHandleProvider, INativeWebViewInstanceConfigurationTarget
 {
     private const nuint NSWindowStyleMaskTitled = 1u << 0;
     private const nuint NSWindowStyleMaskClosable = 1u << 1;
@@ -101,8 +101,6 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
     public NativeWebViewPlatform Platform { get; }
 
     public IWebViewPlatformFeatures Features { get; }
-
-    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
     public bool IsVisible
     {
@@ -446,18 +444,15 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
         EnsureNotDisposed();
         EnsureFeature(NativeWebViewFeature.Dialog, nameof(SetZoomFactor));
 
-        if (!NativeWebViewZoomFactor.IsValid(zoomFactor))
+        if (zoomFactor <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be finite and greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be greater than zero.");
         }
 
         if (!Features.Supports(NativeWebViewFeature.ZoomControl))
         {
             return;
         }
-
-        if (!NativeWebViewZoomFactor.HasChanged(ZoomFactor, zoomFactor))
-            return;
 
         ZoomFactor = zoomFactor;
 
@@ -466,8 +461,6 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
         {
             ObjC.SendVoidDouble(_webViewHandle, NativeSymbols.SelSetPageZoom, zoomFactor);
         }
-
-        ZoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
     }
 
     public void SetUserAgent(string? userAgent)

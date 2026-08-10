@@ -23,7 +23,6 @@ public sealed class NativeWebViewController : IDisposable
     private readonly SemaphoreSlim _initializeGate = new(1, 1);
     private readonly Lock _taskGate = new();
     private readonly object _statusTextGate = new();
-    private readonly object _zoomFactorGate = new();
     private readonly Queue<NativeWebViewStatusTextChangedEventArgs> _statusTextNotifications = [];
     private Task? _initializeTask;
 
@@ -36,7 +35,6 @@ public sealed class NativeWebViewController : IDisposable
     private bool _hasNavigationSnapshot;
     private string? _statusText;
     private bool _isDispatchingStatusText;
-    private double _lastZoomFactor;
 
     public NativeWebViewController(INativeWebViewBackend backend)
     {
@@ -44,7 +42,6 @@ public sealed class NativeWebViewController : IDisposable
 
         AttachBackendEvents();
         SyncNavigationStateFromBackend();
-        _lastZoomFactor = _backend.ZoomFactor;
 
         if (_backend.IsInitialized)
         {
@@ -164,9 +161,6 @@ public sealed class NativeWebViewController : IDisposable
     /// <summary>Occurs when <see cref="StatusText"/> changes.</summary>
     public event EventHandler<NativeWebViewStatusTextChangedEventArgs>? StatusTextChanged;
 
-    /// <summary>Occurs when the effective zoom factor changes.</summary>
-    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
-
     /// <summary>Inserts text into a short-lived target captured by a native context menu.</summary>
     public Task<bool> InsertTextAtContextMenuTargetAsync(
         NativeWebViewContextMenuTarget target,
@@ -270,7 +264,6 @@ public sealed class NativeWebViewController : IDisposable
     {
         ThrowIfDisposed();
         _backend.SetZoomFactor(zoomFactor);
-        PublishZoomFactor(_backend.ZoomFactor);
     }
 
     public void SetUserAgent(string? userAgent)
@@ -465,9 +458,6 @@ public sealed class NativeWebViewController : IDisposable
             lock (_statusTextGate)
                 _statusText = NormalizeStatusText(statusTextProvider.StatusText);
         }
-
-        if (_backend is INativeWebViewZoomFactorProvider zoomFactorProvider)
-            zoomFactorProvider.ZoomFactorChanged += OnZoomFactorChanged;
     }
 
     private void DetachBackendEvents()
@@ -502,31 +492,7 @@ public sealed class NativeWebViewController : IDisposable
             statusTextProvider.StatusTextChanged -= OnStatusTextChanged;
         }
 
-        if (_backend is INativeWebViewZoomFactorProvider zoomFactorProvider)
-            zoomFactorProvider.ZoomFactorChanged -= OnZoomFactorChanged;
-
         ClearStatusText();
-    }
-
-    private void OnZoomFactorChanged(object? sender, NativeWebViewZoomFactorChangedEventArgs e)
-    {
-        _ = sender;
-        PublishZoomFactor(e.ZoomFactor);
-    }
-
-    private void PublishZoomFactor(double zoomFactor)
-    {
-        EventHandler<NativeWebViewZoomFactorChangedEventArgs>? handler;
-        lock (_zoomFactorGate)
-        {
-            if (IsDisposed || !NativeWebViewZoomFactor.HasChanged(_lastZoomFactor, zoomFactor))
-                return;
-
-            _lastZoomFactor = zoomFactor;
-            handler = ZoomFactorChanged;
-        }
-
-        handler?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
     }
 
     private void OnStatusTextChanged(object? sender, NativeWebViewStatusTextChangedEventArgs e)
@@ -892,10 +858,8 @@ public sealed class NativeWebViewController : IDisposable
 public sealed class NativeWebDialogController : IDisposable
 {
     private readonly INativeWebDialogBackend _backend;
-    private readonly object _zoomFactorGate = new();
     private int _state = (int)NativeWebComponentState.Ready;
     private int _disposed;
-    private double _lastZoomFactor;
 
     private Uri? _currentUrl;
     private bool _canGoBack;
@@ -909,7 +873,6 @@ public sealed class NativeWebDialogController : IDisposable
 
         AttachBackendEvents();
         SyncStateFromBackend();
-        _lastZoomFactor = _backend.ZoomFactor;
     }
 
     public NativeWebViewPlatform Platform => _backend.Platform;
@@ -995,9 +958,6 @@ public sealed class NativeWebDialogController : IDisposable
     public event EventHandler<NativeWebViewDownloadItemEventArgs>? DownloadChanged;
 
     public event EventHandler<NativeWebViewDownloadItemEventArgs>? DownloadCompleted;
-
-    /// <summary>Occurs when the effective zoom factor changes.</summary>
-    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
     public void Show(NativeWebDialogShowOptions? options = null)
     {
@@ -1105,7 +1065,6 @@ public sealed class NativeWebDialogController : IDisposable
     {
         ThrowIfDisposed();
         _backend.SetZoomFactor(zoomFactor);
-        PublishZoomFactor(_backend.ZoomFactor);
     }
 
     public void SetUserAgent(string? userAgent)
@@ -1152,8 +1111,6 @@ public sealed class NativeWebDialogController : IDisposable
         _backend.WebResourceRequested += OnWebResourceRequested;
         _backend.ContextMenuRequested += OnContextMenuRequested;
         AttachDownloadManagerEvents();
-        if (_backend is INativeWebViewZoomFactorProvider zoomFactorProvider)
-            zoomFactorProvider.ZoomFactorChanged += OnZoomFactorChanged;
     }
 
     private void DetachBackendEvents()
@@ -1167,29 +1124,6 @@ public sealed class NativeWebDialogController : IDisposable
         _backend.WebResourceRequested -= OnWebResourceRequested;
         _backend.ContextMenuRequested -= OnContextMenuRequested;
         DetachDownloadManagerEvents();
-        if (_backend is INativeWebViewZoomFactorProvider zoomFactorProvider)
-            zoomFactorProvider.ZoomFactorChanged -= OnZoomFactorChanged;
-    }
-
-    private void OnZoomFactorChanged(object? sender, NativeWebViewZoomFactorChangedEventArgs e)
-    {
-        _ = sender;
-        PublishZoomFactor(e.ZoomFactor);
-    }
-
-    private void PublishZoomFactor(double zoomFactor)
-    {
-        EventHandler<NativeWebViewZoomFactorChangedEventArgs>? handler;
-        lock (_zoomFactorGate)
-        {
-            if (IsDisposed || !NativeWebViewZoomFactor.HasChanged(_lastZoomFactor, zoomFactor))
-                return;
-
-            _lastZoomFactor = zoomFactor;
-            handler = ZoomFactorChanged;
-        }
-
-        handler?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
     }
 
     private void OnShown(object? sender, EventArgs e)

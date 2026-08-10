@@ -122,46 +122,6 @@ public sealed class ControllerOrchestrationTests
     }
 
     [Fact]
-    public void NativeWebViewController_ForwardsEffectiveZoomFactor_WithoutDuplicatesOrNativeEchoes()
-    {
-        var backend = new TestWebViewBackend();
-        using var controller = new NativeWebViewController(backend);
-        var changes = new List<double>();
-        controller.ZoomFactorChanged += (_, args) => changes.Add(args.ZoomFactor);
-
-        controller.SetZoomFactor(1.25);
-        backend.EmitZoomFactor(1.25);
-        backend.EmitZoomFactor(1.2505);
-        backend.EmitZoomFactor(1.5);
-
-        Assert.Equal(1.5, controller.ZoomFactor);
-        Assert.Equal([1.25, 1.5], changes);
-    }
-
-    [Fact]
-    public void ZoomFactorChangedEventArgs_RejectsInvalidValues()
-    {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new NativeWebViewZoomFactorChangedEventArgs(0d));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new NativeWebViewZoomFactorChangedEventArgs(double.NaN));
-        Assert.Throws<ArgumentOutOfRangeException>(() => new NativeWebViewZoomFactorChangedEventArgs(double.PositiveInfinity));
-    }
-
-    [Fact]
-    public void NativeWebViewController_RejectsStaleZoomCallbacksAfterDisposal()
-    {
-        var backend = new TestWebViewBackend();
-        var controller = new NativeWebViewController(backend);
-        var changes = new List<double>();
-        controller.ZoomFactorChanged += (_, args) => changes.Add(args.ZoomFactor);
-
-        backend.EmitZoomFactor(1.25);
-        controller.Dispose();
-        backend.EmitZoomFactor(1.5);
-
-        Assert.Equal([1.25], changes);
-    }
-
-    [Fact]
     public async Task NativeWebViewController_DoesNotBlockDisposalWhileStatusSubscriberRuns()
     {
         var backend = new TestWebViewBackend();
@@ -435,7 +395,6 @@ public sealed class ControllerOrchestrationTests
     private sealed class TestWebViewBackend :
         INativeWebViewBackend,
         INativeWebViewStatusTextProvider,
-        INativeWebViewZoomFactorProvider,
         INativeWebViewSnapshotProvider
     {
         private readonly List<Uri> _history = [];
@@ -544,8 +503,6 @@ public sealed class ControllerOrchestrationTests
         public event EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? CoreWebView2ControllerOptionsRequested;
 
         public event EventHandler<NativeWebViewStatusTextChangedEventArgs>? StatusTextChanged;
-
-        public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
         public async ValueTask InitializeAsync(CancellationToken cancellationToken = default)
         {
@@ -743,11 +700,7 @@ public sealed class ControllerOrchestrationTests
         public void SetZoomFactor(double zoomFactor)
         {
             EnsureNotDisposed();
-            if (!NativeWebViewZoomFactor.HasChanged(ZoomFactor, zoomFactor))
-                return;
-
             ZoomFactor = zoomFactor;
-            ZoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
         }
 
         public void SetUserAgent(string? userAgent)
@@ -789,12 +742,6 @@ public sealed class ControllerOrchestrationTests
         {
             StatusText = statusText;
             StatusTextChanged?.Invoke(this, new NativeWebViewStatusTextChangedEventArgs(statusText));
-        }
-
-        public void EmitZoomFactor(double zoomFactor)
-        {
-            ZoomFactor = zoomFactor;
-            ZoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
         }
 
         public void Dispose()

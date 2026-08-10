@@ -41,7 +41,6 @@ title: "NativeWebDialog"
 - Visibility: `Shown`, `Closed`
 - Navigation: `NavigationStarted`, `NavigationCompleted`
 - Downloads: `DownloadStarting`, `DownloadStarted`, `DownloadChanged`, `DownloadCompleted`
-- Browser state: `ZoomFactorChanged`
 - Messaging and interception: `WebMessageReceived`, `NewWindowRequested`, `WebResourceRequested`, `ContextMenuRequested`
 
 ## Typical Usage Pattern

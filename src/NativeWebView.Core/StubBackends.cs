@@ -1,6 +1,6 @@
 namespace NativeWebView.Core;
 
-public abstract class NativeWebViewBackendStubBase : INativeWebViewBackend, INativeWebViewFrameSource, INativeWebViewZoomFactorProvider
+public abstract class NativeWebViewBackendStubBase : INativeWebViewBackend, INativeWebViewFrameSource
 {
     private readonly List<Uri> _history = [];
     private readonly INativeWebViewCommandManager _commandManager = new NoopCommandManager();
@@ -77,9 +77,6 @@ public abstract class NativeWebViewBackendStubBase : INativeWebViewBackend, INat
     public event EventHandler<CoreWebViewEnvironmentRequestedEventArgs>? CoreWebView2EnvironmentRequested;
 
     public event EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? CoreWebView2ControllerOptionsRequested;
-
-    /// <inheritdoc />
-    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
     public ValueTask InitializeAsync(CancellationToken cancellationToken = default)
     {
@@ -246,15 +243,14 @@ public abstract class NativeWebViewBackendStubBase : INativeWebViewBackend, INat
     {
         EnsureNotDisposed();
 
-        if (!NativeWebViewZoomFactor.IsValid(zoomFactor))
+        if (zoomFactor <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be finite and greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be greater than zero.");
         }
 
-        if (NativeWebViewZoomFactor.HasChanged(ZoomFactor, zoomFactor))
+        if (Features.Supports(NativeWebViewFeature.ZoomControl))
         {
             ZoomFactor = zoomFactor;
-            ZoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
         }
     }
 
@@ -514,7 +510,7 @@ public abstract class NativeWebViewBackendStubBase : INativeWebViewBackend, INat
     }
 }
 
-public abstract class NativeWebDialogBackendStubBase : INativeWebDialogBackend, INativeWebViewZoomFactorProvider
+public abstract class NativeWebDialogBackendStubBase : INativeWebDialogBackend
 {
     private readonly List<Uri> _history = [];
     private int _historyIndex = -1;
@@ -572,9 +568,6 @@ public abstract class NativeWebDialogBackendStubBase : INativeWebDialogBackend, 
     public event EventHandler<NativeWebViewResourceRequestedEventArgs>? WebResourceRequested;
 
     public event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? ContextMenuRequested;
-
-    /// <inheritdoc />
-    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
     public void Show(NativeWebDialogShowOptions? options = null)
     {
@@ -772,15 +765,14 @@ public abstract class NativeWebDialogBackendStubBase : INativeWebDialogBackend, 
         EnsureNotDisposed();
         EnsureFeature(NativeWebViewFeature.Dialog, nameof(SetZoomFactor));
 
-        if (!NativeWebViewZoomFactor.IsValid(zoomFactor))
+        if (zoomFactor <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be finite and greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be greater than zero.");
         }
 
-        if (NativeWebViewZoomFactor.HasChanged(ZoomFactor, zoomFactor))
+        if (Features.Supports(NativeWebViewFeature.ZoomControl))
         {
             ZoomFactor = zoomFactor;
-            ZoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
         }
     }
 

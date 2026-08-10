@@ -113,7 +113,7 @@ Use `NativeWebDialog` when the browser should live in a separate desktop window,
 Current embedded runtime implementation exists on Windows, macOS, and Linux in the default desktop build. iOS and Android runtime support is compiled from their platform-targeted backend assemblies rather than the default `net10.0` contract build, and the Browser runtime is compiled from the browser-targeted backend assembly. Windows and Linux now also ship real `NativeWebDialog` runtimes backed by native desktop windows plus their existing WebView2/WebKitGTK engines, and `WebAuthenticationBroker` runs real modal or popup browser sessions whenever the corresponding platform runtime assembly is present. The Browser implementation hosts a real embedded `iframe` through Avalonia Browser native hosting and a DOM bridge; navigation is real, but script execution, `window.chrome.webview` emulation, and new-window interception depend on same-origin access or explicit `postMessage` cooperation from the hosted page, and normal browser frame restrictions such as `X-Frame-Options` / `Content-Security-Policy: frame-ancestors` still apply. Browser authentication uses `window.open`, so popup support plus an inspectable `http` or `https` callback URL are required there; custom-scheme callbacks and `UseHttpPost` are not supported on the current browser runtime path. The iOS implementation hosts `WKWebView` through a backend-owned `UIView` attachment path and a modal authentication controller when `NativeWebView.Platform.iOS` is built with the .NET 10 Apple workload; `NativeWebDialog` remains unsupported there. The Android implementation hosts `android.webkit.WebView` through a backend-owned child `View` attachment and a dedicated authentication activity when `NativeWebView.Platform.Android` is built with the .NET 10 Android workload; `NativeWebDialog` remains unsupported there. Per-instance proxy application is effective on the Windows and Linux `NativeWebView` and `NativeWebDialog` runtime paths, on macOS 14+ for `NativeWebView` and `NativeWebDialog`, and on iOS 17+ for the embedded `NativeWebView` control when the iOS runtime assembly is present. The macOS and iOS implementations support explicit `http`, `https`, and `socks5` proxy servers, credentials, and bypass domains, and use a dedicated `WKWebsiteDataStore` identity derived from the instance configuration so proxied views do not fall back to private-browsing storage semantics. On Linux, explicit `http`, `https`, and `socks` proxies are runtime-applied on the X11 control/dialog paths; `AutoConfigUrl`, embedded proxy credentials, and direct PDF export are not currently applied there. On Android, the official AndroidX proxy override remains app-wide, so per-instance proxy configuration is still contract-only on the current runtime path. Browser targets remain unsupported for per-instance proxy application because the host browser does not expose per-instance engine proxy control. `WebAuthenticationBroker.UseHttpPost` currently remains unsupported on all runtime backends in this repo.
 
 Use `NativeWebViewPlatformImplementationStatusMatrix.Get(platform)` to inspect the honest current repo runtime status for each target. Use `NativeWebViewProxyPlatformSupportMatrix.Get(platform)` for proxy-specific status. The current core package also exposes `NativeWebViewWindowsProxyArgumentsBuilder` and `NativeWebViewLinuxProxySettingsBuilder` so future or custom backends can translate shared proxy options into WebView2/WebKitGTK-specific configuration payloads without duplicating parsing logic.
-Exact `UserDataFolder`/`CacheFolder`/`CookieDataFolder`/`SessionDataFolder` behavior remains backend-specific. On Linux, `UserDataFolder` (or `SessionDataFolder` as a fallback) and `CacheFolder` configure the WebKitGTK website data manager, while `CookieDataFolder` configures its persistent cookie database; private mode uses an ephemeral web context and ignores those persistent locations. The macOS and iOS `WKWebView` runtime paths use storage-path values and `ProfileName` as part of an isolated data-store identity rather than direct physical directory mapping. Private mode uses a non-persistent data store; dedicated persistent identities require macOS 14+ or iOS 17+.
+Exact `UserDataFolder`/`CacheFolder`/`CookieDataFolder`/`SessionDataFolder` behavior remains backend-specific. In the current repo, Linux currently runtime-applies `CookieDataFolder`, `Language`, `IsInPrivateModeEnabled`, and explicit proxy settings on the embedded control path, while `UserDataFolder`, `CacheFolder`, and `SessionDataFolder` remain backend-specific configuration contracts there. The macOS and iOS `WKWebView` proxy/runtime paths use storage-path values as part of isolated data-store identity rather than direct physical directory mapping.
 
 ## Rendering Modes
 
@@ -136,8 +136,6 @@ Useful runtime APIs:
 Render sidecar metadata includes `FrameId`, `CapturedAtUtc`, `RenderMode`, `Origin`, `PixelDataLength`, and `PixelDataSha256`. Integrity verification requires matching `FormatVersion`.
 
 `StatusText` and `StatusTextChanged` expose bounded native hover/link status on platforms that advertise `NativeWebViewFeature.StatusText`. Setting `IsStatusBarEnabled` to `false` hides the engine-provided status UI but does not suppress these events. Embedded snapshot capture is best-effort: cancellation propagates, while unsupported, uninitialized, unavailable, and failed captures return `null`.
-
-`ZoomFactorChanged` reports effective programmatic zoom changes on every backend. Windows, Linux, and macOS additionally advertise `NativeWebViewFeature.ZoomFactorChangeNotification` and report native or user-driven zoom changes.
 
 ## Samples
 
@@ -168,14 +166,6 @@ if (!diagnostics.IsReady)
 }
 
 NativeWebViewDiagnosticsValidator.EnsureReady(diagnostics);
-```
-
-Applications can offer a platform-neutral repair action when an issue supplies a remediation:
-
-```csharp
-var installRuntime = diagnostics.Issues
-    .Select(issue => issue.Remediation)
-    .FirstOrDefault(remediation => remediation?.Kind == NativeWebViewDiagnosticRemediationKind.InstallRuntime);
 ```
 
 Generate release-facing diagnostics and gate artifacts:

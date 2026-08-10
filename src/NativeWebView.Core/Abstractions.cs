@@ -48,9 +48,7 @@ public enum NativeWebViewFeature
     /// <summary>Reports the text normally displayed by the browser status UI, such as a hovered link target.</summary>
     StatusText = 1 << 27,
     /// <summary>Captures the visible viewport of an embedded native WebView as an encoded image.</summary>
-    EmbeddedSnapshotCapture = 1 << 28,
-    /// <summary>Reports native or user-driven changes to the effective zoom factor.</summary>
-    ZoomFactorChangeNotification = 1 << 29
+    EmbeddedSnapshotCapture = 1 << 28
 }
 
 /// <summary>Specifies which document frames receive a document-start script.</summary>

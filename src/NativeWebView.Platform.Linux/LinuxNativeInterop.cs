@@ -420,9 +420,6 @@ internal static class LinuxNativeInterop
     internal delegate void MouseTargetChangedSignal(IntPtr webView, IntPtr hitTestResult, uint modifiers, IntPtr userData);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    internal delegate void NotifySignal(IntPtr instance, IntPtr parameterSpec, IntPtr userData);
-
-    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate void JavaScriptFinishedCallback(IntPtr webView, IntPtr asyncResult, IntPtr userData);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -594,23 +591,6 @@ internal static class LinuxNativeInterop
 
     [DllImport(WebKitName)]
     internal static extern IntPtr webkit_web_context_new_ephemeral();
-
-    [DllImport(WebKitName)]
-    internal static extern IntPtr webkit_web_context_new_with_website_data_manager(IntPtr manager);
-
-    [DllImport(WebKitName, EntryPoint = "webkit_website_data_manager_new")]
-    internal static extern IntPtr webkit_website_data_manager_new_with_one_directory(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string propertyName,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string propertyValue,
-        IntPtr terminator);
-
-    [DllImport(WebKitName, EntryPoint = "webkit_website_data_manager_new")]
-    internal static extern IntPtr webkit_website_data_manager_new_with_two_directories(
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string firstPropertyName,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string firstPropertyValue,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string secondPropertyName,
-        [MarshalAs(UnmanagedType.LPUTF8Str)] string secondPropertyValue,
-        IntPtr terminator);
 
     [DllImport(WebKitName)]
     internal static extern IntPtr webkit_web_context_get_website_data_manager(IntPtr context);

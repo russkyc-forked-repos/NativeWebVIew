@@ -147,13 +147,6 @@ public sealed class NativeWebDialog : IDisposable
         remove => _controller.DownloadCompleted -= value;
     }
 
-    /// <summary>Occurs when the effective zoom factor changes.</summary>
-    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged
-    {
-        add => _controller.ZoomFactorChanged += value;
-        remove => _controller.ZoomFactorChanged -= value;
-    }
-
     public void Show(NativeWebDialogShowOptions? options = null)
     {
         ApplyInstanceConfigurationToBackend();
