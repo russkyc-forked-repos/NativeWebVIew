@@ -14,7 +14,8 @@ public sealed class BrowserNativeWebViewBackend
       INativeWebViewFrameSource,
       INativeWebViewPlatformHandleProvider,
       INativeWebViewInstanceConfigurationTarget,
-      INativeWebViewManagedControlHandleProvider
+      INativeWebViewManagedControlHandleProvider,
+      INativeWebViewZoomFactorProvider
 {
     private enum BrowserNavigationOperation
     {
@@ -181,6 +182,8 @@ public sealed class BrowserNativeWebViewBackend
     public event EventHandler<CoreWebViewEnvironmentRequestedEventArgs>? CoreWebView2EnvironmentRequested;
 
     public event EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? CoreWebView2ControllerOptionsRequested;
+
+    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
     public void ApplyInstanceConfiguration(NativeWebViewInstanceConfiguration configuration)
     {
@@ -440,9 +443,9 @@ public sealed class BrowserNativeWebViewBackend
     {
         EnsureNotDisposed();
 
-        if (zoomFactor <= 0)
+        if (!NativeWebViewZoomFactor.IsValid(zoomFactor))
         {
-            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be greater than zero.");
+            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be finite and greater than zero.");
         }
 
         if (!Features.Supports(NativeWebViewFeature.ZoomControl))
@@ -450,7 +453,11 @@ public sealed class BrowserNativeWebViewBackend
             return;
         }
 
+        if (!NativeWebViewZoomFactor.HasChanged(_zoomFactor, zoomFactor))
+            return;
+
         _zoomFactor = zoomFactor;
+        ZoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
         if (ShouldUseRuntimePath())
         {
             BrowserNativeWebViewInterop.SetZoomFactor(_frameElement!, _zoomFactor);

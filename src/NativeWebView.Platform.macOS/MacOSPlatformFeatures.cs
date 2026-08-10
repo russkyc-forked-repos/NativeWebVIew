@@ -29,7 +29,9 @@ internal static class MacOSPlatformFeatures
         NativeWebViewFeature.Downloads;
 
     public static IWebViewPlatformFeatures EmbeddedInstance => Create(
-        BaseFeatures | NativeWebViewFeature.DocumentStartScriptInjection);
+        BaseFeatures |
+        NativeWebViewFeature.DocumentStartScriptInjection |
+        NativeWebViewFeature.ZoomFactorChangeNotification);
 
     public static IWebViewPlatformFeatures DialogInstance => Create(BaseFeatures);
 

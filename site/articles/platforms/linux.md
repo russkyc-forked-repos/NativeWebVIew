@@ -54,8 +54,8 @@ The embedded control runtime expects GTK3/WebKitGTK on an X11-capable Linux sess
 
 - The embedded control runtime is implemented on Linux/X11 only; the backend does not currently provide a native Wayland host path.
 - The dialog and broker runtime paths are also implemented on Linux/X11 only.
-- `CookieDataFolder` maps to persistent WebKitGTK cookie storage when private mode is disabled.
-- `UserDataFolder`, `CacheFolder`, and `SessionDataFolder` remain backend-specific configuration contracts on Linux in the current repo.
+- `UserDataFolder` (or `SessionDataFolder` when no user-data path is supplied) and `CacheFolder` configure the persistent WebKitGTK website data manager.
+- `CookieDataFolder` maps to persistent WebKitGTK cookie storage when private mode is disabled. Private mode uses an ephemeral web context and does not reuse the configured persistent locations.
 - `PrintAsync()` delegates to the native WebKitGTK print pipeline, but direct PDF export through `OutputPath` is not implemented.
 - `WebAuthenticationBroker.UseHttpPost` is not currently implemented on the Linux runtime path.
 

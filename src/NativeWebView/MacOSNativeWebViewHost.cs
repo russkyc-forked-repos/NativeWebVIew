@@ -206,6 +206,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         public static readonly IntPtr SelPixelsWide = ObjC.GetSelector("pixelsWide");
         public static readonly IntPtr SelPixelsHigh = ObjC.GetSelector("pixelsHigh");
         public static readonly IntPtr SelDataStoreForIdentifier = ObjC.GetSelector("dataStoreForIdentifier:");
+        public static readonly IntPtr SelNonPersistentDataStore = ObjC.GetSelector("nonPersistentDataStore");
         public static readonly IntPtr SelSetWebsiteDataStore = ObjC.GetSelector("setWebsiteDataStore:");
         public static readonly IntPtr SelSetProxyConfigurations = ObjC.GetSelector("setProxyConfigurations:");
         public static readonly IntPtr SelRequest = ObjC.GetSelector("request");
@@ -263,6 +264,9 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private int _capturePixelHeight = 1;
     private int _layoutRefreshVersion;
     private int _pendingNavigationVersion;
+    private int _currentNavigationVersion;
+    private IntPtr _currentNavigationHandle;
+    private bool _acceptedNavigationAwaitingStart;
     private Uri? _pendingNavigationUri;
     private Uri? _lastNavigationUri;
     private Uri? _contextMenuDownloadUri;
@@ -273,6 +277,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private readonly PendingNativeOperationRegistry<SnapshotCaptureContext> _pendingSnapshotCaptures = new();
     private long _captureFrameSequence;
     private int _snapshotGeneration;
+    private double _zoomFactor = 1d;
     private GCHandle _managedHandle;
     private IntPtr _navigationDelegateHandle;
     private IntPtr _userContentControllerHandle;
@@ -307,7 +312,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             var initialFrame = ObjC.SendCGRect(parent.Handle, NativeSymbols.SelBounds);
 
             ConfigurationHandle = ObjC.SendIntPtr(ObjC.SendIntPtr(NativeSymbols.WKWebViewConfigurationClass, NativeSymbols.SelAlloc), NativeSymbols.SelInit);
-            ApplyProxyConfiguration();
+            ApplyWebsiteDataStoreConfiguration();
             InstallUserContentScripts();
             ViewHandle = ObjC.SendIntPtrCGRectIntPtr(
                 ObjC.SendIntPtr(MacOSKeyEquivalentWebView.ClassHandle, NativeSymbols.SelAlloc),
@@ -345,6 +350,8 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
     public IntPtr ConfigurationHandle { get; private set; }
 
+    public double ZoomFactor => _zoomFactor;
+
     public event EventHandler<NativeWebViewNavigationStartedEventArgs>? NavigationStarted;
 
     public event EventHandler<NativeWebViewNavigationCompletedEventArgs>? NavigationCompleted;
@@ -360,6 +367,8 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     public event EventHandler<NativeWebViewMessageReceivedEventArgs>? WebMessageReceived;
 
     public event EventHandler? NativeFocusRequested;
+
+    public event EventHandler<NativeWebViewZoomFactorChangedEventArgs>? ZoomFactorChanged;
 
     public void AttachToParent(IPlatformHandle parent)
     {
@@ -592,10 +601,17 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         if (_disposed || version != _pendingNavigationVersion || _pendingNavigationUri is not { } uri)
             return;
 
+        if (_acceptedNavigationAwaitingStart && _currentNavigationVersion == version)
+            return;
+
         if (CanLoadNavigation() || attempt >= MaxPendingNavigationAttempts)
         {
-            if (TryLoadRequest(uri))
+            var navigation = TryLoadRequest(uri);
+            if (navigation != IntPtr.Zero)
             {
+                _currentNavigationHandle = navigation;
+                _currentNavigationVersion = version;
+                _acceptedNavigationAwaitingStart = true;
                 DispatcherTimer.RunOnce(
                     () => RetryAcceptedNavigationIfNotStarted(version, attempt + 1),
                     AcceptedNavigationStartTimeout,
@@ -622,11 +638,14 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     {
         if (_disposed ||
             version != _pendingNavigationVersion ||
-            _pendingNavigationUri is null)
+            _pendingNavigationUri is null ||
+            !_acceptedNavigationAwaitingStart ||
+            _currentNavigationVersion != version)
         {
             return;
         }
 
+        _acceptedNavigationAwaitingStart = false;
         TryLoadOrSchedulePendingNavigation(version, attempt);
     }
 
@@ -659,7 +678,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         return bounds.Size.Width > 0 && bounds.Size.Height > 0;
     }
 
-    private bool TryLoadRequest(Uri uri)
+    private IntPtr TryLoadRequest(Uri uri)
     {
         _lastNavigationUri = uri;
 
@@ -677,7 +696,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
         var navigation = ObjC.SendIntPtrIntPtr(ViewHandle, NativeSymbols.SelLoadRequest, request);
         TraceDownload("navigation.load-request", $"uri={uri.AbsoluteUri}, accepted={navigation != IntPtr.Zero}");
-        return navigation != IntPtr.Zero;
+        return navigation;
     }
 
     public void Reload()
@@ -719,12 +738,27 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
+        if (!NativeWebViewZoomFactor.IsValid(zoomFactor))
+            throw new ArgumentOutOfRangeException(nameof(zoomFactor), zoomFactor, "Zoom factor must be finite and greater than zero.");
+
+        if (!NativeWebViewZoomFactor.HasChanged(_zoomFactor, zoomFactor))
+            return;
+
         if (!ObjC.SendBoolIntPtr(ViewHandle, NativeSymbols.SelRespondsToSelector, NativeSymbols.SelSetPageZoom))
         {
             return;
         }
 
         ObjC.SendVoidDouble(ViewHandle, NativeSymbols.SelSetPageZoom, zoomFactor);
+    }
+
+    private void OnNativeZoomFactorChanged(double zoomFactor)
+    {
+        if (_disposed || !NativeWebViewZoomFactor.HasChanged(_zoomFactor, zoomFactor))
+            return;
+
+        _zoomFactor = zoomFactor;
+        ZoomFactorChanged?.Invoke(this, new NativeWebViewZoomFactorChangedEventArgs(zoomFactor));
     }
 
     public NativeWebViewPrintResult Print(NativeWebViewPrintSettings? settings = null)
@@ -1694,8 +1728,16 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         return hasAttachment || hasDownloadOnlyMime || hasDownloadOnlyUri;
     }
 
-    private void NavigationDidStart()
+    private void NavigationDidStart(IntPtr navigation)
     {
+        if (IsSupersededNavigation(navigation))
+        {
+            TraceDownload("navigation.did-start.superseded", $"navigation=0x{navigation.ToInt64():X}");
+            return;
+        }
+
+        _currentNavigationHandle = navigation;
+        _acceptedNavigationAwaitingStart = false;
         var uri = ResolveWebViewUri() ?? _lastNavigationUri ?? _pendingNavigationUri;
         TraceDownload("navigation.did-start", uri?.AbsoluteUri ?? "<null>");
         ClearPendingNavigation(uri);
@@ -1705,8 +1747,16 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         RaiseNavigationHistoryChanged();
     }
 
-    private void NavigationDidFinish()
+    private void NavigationDidFinish(IntPtr navigation)
     {
+        if (IsSupersededNavigation(navigation))
+        {
+            TraceDownload("navigation.did-finish.superseded", $"navigation=0x{navigation.ToInt64():X}");
+            return;
+        }
+
+        _currentNavigationHandle = IntPtr.Zero;
+        _acceptedNavigationAwaitingStart = false;
         var uri = ResolveWebViewUri() ?? _lastNavigationUri ?? _pendingNavigationUri;
         TraceDownload("navigation.did-finish", uri?.AbsoluteUri ?? "<null>");
         ClearPendingNavigation(uri);
@@ -1719,8 +1769,18 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         RaiseNavigationHistoryChanged();
     }
 
-    private void NavigationDidFail(IntPtr error)
+    private void NavigationDidFail(IntPtr navigation, IntPtr error)
     {
+        if (IsSupersededNavigation(navigation))
+        {
+            TraceDownload(
+                "navigation.did-fail.superseded",
+                $"navigation=0x{navigation.ToInt64():X}, error={ResolveErrorCode(error) ?? "<null>"}");
+            return;
+        }
+
+        _currentNavigationHandle = IntPtr.Zero;
+        _acceptedNavigationAwaitingStart = false;
         var uri = ResolveWebViewUri() ?? _lastNavigationUri ?? _pendingNavigationUri;
         TraceDownload("navigation.did-fail", $"{uri?.AbsoluteUri ?? "<null>"}, error={ResolveErrorCode(error) ?? "<null>"}");
         ClearPendingNavigation(uri);
@@ -1737,6 +1797,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
         RaiseNavigationHistoryChanged();
     }
+
+    private bool IsSupersededNavigation(IntPtr navigation) =>
+        navigation != IntPtr.Zero &&
+        _currentNavigationHandle != IntPtr.Zero &&
+        navigation != _currentNavigationHandle;
 
     private void ClearPendingNavigation(Uri? uri)
     {
@@ -3054,13 +3119,38 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         return ObjC.SendIntPtrIntPtr(classHandle, selector, nsString);
     }
 
-    private void ApplyProxyConfiguration()
+    private void ApplyWebsiteDataStoreConfiguration()
     {
         var proxyConfiguration = NativeWebViewProxyConfigurationResolver.Resolve(_instanceConfiguration.EnvironmentOptions.Proxy);
-        if (proxyConfiguration is null)
-        {
+        var dataStoreKind = ResolveWebsiteDataStoreKind(_instanceConfiguration, proxyConfiguration);
+        if (dataStoreKind == MacOSWebsiteDataStoreKind.Default)
             return;
+
+        IntPtr dataStoreHandle;
+        if (dataStoreKind == MacOSWebsiteDataStoreKind.NonPersistent)
+        {
+            dataStoreHandle = ObjC.SendIntPtr(
+                NativeSymbols.WKWebsiteDataStoreClass,
+                NativeSymbols.SelNonPersistentDataStore);
         }
+        else
+        {
+            if (!OperatingSystem.IsMacOSVersionAtLeast(14))
+            {
+                throw new PlatformNotSupportedException(
+                    "Dedicated persistent WKWebsiteDataStore profiles require macOS 14.0 or later.");
+            }
+
+            dataStoreHandle = CreateWebsiteDataStoreHandle(proxyConfiguration);
+        }
+
+        if (dataStoreHandle == IntPtr.Zero)
+            throw new InvalidOperationException("Failed to create the requested WKWebsiteDataStore.");
+
+        ObjC.SendVoidIntPtr(ConfigurationHandle, NativeSymbols.SelSetWebsiteDataStore, dataStoreHandle);
+
+        if (proxyConfiguration is null)
+            return;
 
         if (proxyConfiguration.Kind == NativeWebViewProxyKind.AutoConfigUrl)
         {
@@ -3072,12 +3162,6 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         {
             throw new PlatformNotSupportedException(
                 "Per-instance proxy configuration requires macOS 14.0 or later for WKWebsiteDataStore.proxyConfigurations.");
-        }
-
-        var dataStoreHandle = CreateWebsiteDataStoreHandle(proxyConfiguration);
-        if (dataStoreHandle == IntPtr.Zero)
-        {
-            throw new InvalidOperationException("Failed to create a dedicated WKWebsiteDataStore for proxy configuration.");
         }
 
         if (!ObjC.SendBoolIntPtr(dataStoreHandle, NativeSymbols.SelRespondsToSelector, NativeSymbols.SelSetProxyConfigurations))
@@ -3096,7 +3180,6 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
             }
 
             ObjC.SendVoidIntPtr(dataStoreHandle, NativeSymbols.SelSetProxyConfigurations, arrayHandle);
-            ObjC.SendVoidIntPtr(ConfigurationHandle, NativeSymbols.SelSetWebsiteDataStore, dataStoreHandle);
         }
         finally
         {
@@ -3104,7 +3187,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         }
     }
 
-    private IntPtr CreateWebsiteDataStoreHandle(NativeWebViewResolvedProxyConfiguration proxyConfiguration)
+    private IntPtr CreateWebsiteDataStoreHandle(NativeWebViewResolvedProxyConfiguration? proxyConfiguration)
     {
         var identifier = CreateWebsiteDataStoreIdentifier(_instanceConfiguration, proxyConfiguration);
         var uuidHandle = CreateNativeUuid(identifier);
@@ -3122,6 +3205,25 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
                 ObjC.SendVoid(uuidHandle, NativeSymbols.SelRelease);
             }
         }
+    }
+
+    internal static MacOSWebsiteDataStoreKind ResolveWebsiteDataStoreKind(
+        NativeWebViewInstanceConfiguration configuration,
+        NativeWebViewResolvedProxyConfiguration? proxyConfiguration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        if (configuration.ControllerOptions.IsInPrivateModeEnabled)
+            return MacOSWebsiteDataStoreKind.NonPersistent;
+
+        var environment = configuration.EnvironmentOptions;
+        return proxyConfiguration is not null ||
+               !string.IsNullOrWhiteSpace(configuration.ControllerOptions.ProfileName) ||
+               !string.IsNullOrWhiteSpace(environment.UserDataFolder) ||
+               !string.IsNullOrWhiteSpace(environment.CacheFolder) ||
+               !string.IsNullOrWhiteSpace(environment.CookieDataFolder) ||
+               !string.IsNullOrWhiteSpace(environment.SessionDataFolder)
+            ? MacOSWebsiteDataStoreKind.DedicatedPersistent
+            : MacOSWebsiteDataStoreKind.Default;
     }
 
     private static IntPtr CreateNativeProxyConfiguration(NativeWebViewResolvedProxyConfiguration configuration)
@@ -3247,28 +3349,27 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
     private static Guid CreateWebsiteDataStoreIdentifier(
         NativeWebViewInstanceConfiguration configuration,
-        NativeWebViewResolvedProxyConfiguration proxyConfiguration)
+        NativeWebViewResolvedProxyConfiguration? proxyConfiguration)
     {
         var builder = new StringBuilder();
-        AppendIdentityPart(builder, "proxy-kind", proxyConfiguration.Kind.ToString());
-        AppendIdentityPart(builder, "proxy-host", proxyConfiguration.Host);
-        AppendIdentityPart(builder, "proxy-port", proxyConfiguration.Port.ToString(CultureInfo.InvariantCulture));
-        AppendIdentityPart(builder, "proxy-tls", proxyConfiguration.UseTls ? "true" : "false");
-        AppendIdentityPart(builder, "proxy-username", proxyConfiguration.Username);
-        AppendIdentityPart(builder, "proxy-autoconfig", proxyConfiguration.AutoConfigUrl);
-
-        var normalizedExcludedDomains = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var excludedDomain in proxyConfiguration.ExcludedDomains)
+        if (proxyConfiguration is not null)
         {
-            if (TryNormalizeExcludedDomain(excludedDomain, out var normalizedExcludedDomain))
+            AppendIdentityPart(builder, "proxy-kind", proxyConfiguration.Kind.ToString());
+            AppendIdentityPart(builder, "proxy-host", proxyConfiguration.Host);
+            AppendIdentityPart(builder, "proxy-port", proxyConfiguration.Port.ToString(CultureInfo.InvariantCulture));
+            AppendIdentityPart(builder, "proxy-tls", proxyConfiguration.UseTls ? "true" : "false");
+            AppendIdentityPart(builder, "proxy-username", proxyConfiguration.Username);
+            AppendIdentityPart(builder, "proxy-autoconfig", proxyConfiguration.AutoConfigUrl);
+
+            var normalizedExcludedDomains = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var excludedDomain in proxyConfiguration.ExcludedDomains)
             {
-                normalizedExcludedDomains.Add(normalizedExcludedDomain);
+                if (TryNormalizeExcludedDomain(excludedDomain, out var normalizedExcludedDomain))
+                    normalizedExcludedDomains.Add(normalizedExcludedDomain);
             }
-        }
 
-        foreach (var excludedDomain in normalizedExcludedDomains)
-        {
-            AppendIdentityPart(builder, "proxy-bypass", excludedDomain);
+            foreach (var excludedDomain in normalizedExcludedDomains)
+                AppendIdentityPart(builder, "proxy-bypass", excludedDomain);
         }
 
         var environmentOptions = configuration.EnvironmentOptions;
@@ -3279,6 +3380,13 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         AppendIdentityPart(builder, "profile-name", configuration.ControllerOptions.ProfileName);
 
         return CreateDeterministicGuid(builder.ToString());
+    }
+
+    internal enum MacOSWebsiteDataStoreKind
+    {
+        Default,
+        NonPersistent,
+        DedicatedPersistent,
     }
 
     private static void AppendIdentityPart(StringBuilder builder, string key, string? value)
@@ -4157,6 +4265,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         private static readonly Lazy<IntPtr> ViewClass = new(CreateViewClass);
         private static readonly PerformKeyEquivalentDelegate PerformKeyEquivalentCallback = PerformKeyEquivalent;
         private static readonly ViewDidMoveToWindowDelegate ViewDidMoveToWindowCallback = ViewDidMoveToWindow;
+        private static readonly SetPageZoomDelegate SetPageZoomCallback = SetPageZoom;
         private static readonly AcceptsFirstMouseDelegate AcceptsFirstMouseCallback = AcceptsFirstMouse;
         private static readonly MouseEventDelegate MouseDownCallback = MouseDown;
         private static readonly MouseEventDelegate RightMouseDownCallback = RightMouseDown;
@@ -4194,6 +4303,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
                 "viewDidMoveToWindow",
                 ViewDidMoveToWindowCallback,
                 "v@:");
+            AddMethod(
+                classHandle,
+                "setPageZoom:",
+                SetPageZoomCallback,
+                "v@:d");
             AddMethod(
                 classHandle,
                 "acceptsFirstMouse:",
@@ -4272,6 +4386,19 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         {
             ObjC.SendSuperVoid(self, NativeSymbols.WKWebViewClass, selector);
             GetOwner(self)?.ViewDidMoveToWindow();
+        }
+
+        private static void SetPageZoom(IntPtr self, IntPtr selector, double zoomFactor)
+        {
+            ObjC.SendSuperVoidDouble(self, NativeSymbols.WKWebViewClass, selector, zoomFactor);
+            try
+            {
+                GetOwner(self)?.OnNativeZoomFactorChanged(zoomFactor);
+            }
+            catch
+            {
+                // Never allow managed subscribers to unwind through an Objective-C callback.
+            }
         }
 
         private static byte AcceptsFirstMouse(IntPtr self, IntPtr selector, IntPtr eventHandle)
@@ -4412,6 +4539,8 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate void ViewDidMoveToWindowDelegate(IntPtr self, IntPtr selector);
+
+        private delegate void SetPageZoomDelegate(IntPtr self, IntPtr selector, double zoomFactor);
 
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate byte AcceptsFirstMouseDelegate(IntPtr self, IntPtr selector, IntPtr eventHandle);
@@ -4791,24 +4920,21 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         {
             _ = selector;
             _ = webView;
-            _ = navigation;
-            GetOwner(self)?.NavigationDidStart();
+            GetOwner(self)?.NavigationDidStart(navigation);
         }
 
         private static void DidFinishNavigation(IntPtr self, IntPtr selector, IntPtr webView, IntPtr navigation)
         {
             _ = selector;
             _ = webView;
-            _ = navigation;
-            GetOwner(self)?.NavigationDidFinish();
+            GetOwner(self)?.NavigationDidFinish(navigation);
         }
 
         private static void DidFailNavigation(IntPtr self, IntPtr selector, IntPtr webView, IntPtr navigation, IntPtr error)
         {
             _ = selector;
             _ = webView;
-            _ = navigation;
-            GetOwner(self)?.NavigationDidFail(error);
+            GetOwner(self)?.NavigationDidFail(navigation, error);
         }
 
         private static void DecideDestination(IntPtr self, IntPtr selector, IntPtr download, IntPtr response, IntPtr suggestedFilename, IntPtr completionHandler)
@@ -5534,6 +5660,9 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSendSuper")]
         private static extern void objc_msgSendSuper_Void_IntPtr(ref ObjCSuper super, IntPtr selector, IntPtr arg1);
 
+        [DllImport("/usr/lib/libobjc.A.dylib", EntryPoint = "objc_msgSendSuper")]
+        private static extern void objc_msgSendSuper_Void_Double(ref ObjCSuper super, IntPtr selector, double arg1);
+
         public static IntPtr GetClass(string name)
         {
             if (!OperatingSystem.IsMacOS())
@@ -5699,6 +5828,12 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         {
             var super = new ObjCSuper(receiver, superClass);
             objc_msgSendSuper_Void_IntPtr(ref super, selector, arg1);
+        }
+
+        public static void SendSuperVoidDouble(IntPtr receiver, IntPtr superClass, IntPtr selector, double arg1)
+        {
+            var super = new ObjCSuper(receiver, superClass);
+            objc_msgSendSuper_Void_Double(ref super, selector, arg1);
         }
 
         public static void SendSuperVoidIntPtrIntPtr(IntPtr receiver, IntPtr superClass, IntPtr selector, IntPtr arg1, IntPtr arg2)
