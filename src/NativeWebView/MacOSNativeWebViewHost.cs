@@ -264,6 +264,9 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     private int _capturePixelHeight = 1;
     private int _layoutRefreshVersion;
     private int _pendingNavigationVersion;
+    private int _currentNavigationVersion;
+    private IntPtr _currentNavigationHandle;
+    private bool _acceptedNavigationAwaitingStart;
     private Uri? _pendingNavigationUri;
     private Uri? _lastNavigationUri;
     private Uri? _contextMenuDownloadUri;
@@ -598,10 +601,17 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         if (_disposed || version != _pendingNavigationVersion || _pendingNavigationUri is not { } uri)
             return;
 
+        if (_acceptedNavigationAwaitingStart && _currentNavigationVersion == version)
+            return;
+
         if (CanLoadNavigation() || attempt >= MaxPendingNavigationAttempts)
         {
-            if (TryLoadRequest(uri))
+            var navigation = TryLoadRequest(uri);
+            if (navigation != IntPtr.Zero)
             {
+                _currentNavigationHandle = navigation;
+                _currentNavigationVersion = version;
+                _acceptedNavigationAwaitingStart = true;
                 DispatcherTimer.RunOnce(
                     () => RetryAcceptedNavigationIfNotStarted(version, attempt + 1),
                     AcceptedNavigationStartTimeout,
@@ -628,11 +638,14 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
     {
         if (_disposed ||
             version != _pendingNavigationVersion ||
-            _pendingNavigationUri is null)
+            _pendingNavigationUri is null ||
+            !_acceptedNavigationAwaitingStart ||
+            _currentNavigationVersion != version)
         {
             return;
         }
 
+        _acceptedNavigationAwaitingStart = false;
         TryLoadOrSchedulePendingNavigation(version, attempt);
     }
 
@@ -665,7 +678,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         return bounds.Size.Width > 0 && bounds.Size.Height > 0;
     }
 
-    private bool TryLoadRequest(Uri uri)
+    private IntPtr TryLoadRequest(Uri uri)
     {
         _lastNavigationUri = uri;
 
@@ -683,7 +696,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
         var navigation = ObjC.SendIntPtrIntPtr(ViewHandle, NativeSymbols.SelLoadRequest, request);
         TraceDownload("navigation.load-request", $"uri={uri.AbsoluteUri}, accepted={navigation != IntPtr.Zero}");
-        return navigation != IntPtr.Zero;
+        return navigation;
     }
 
     public void Reload()
@@ -1715,8 +1728,16 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         return hasAttachment || hasDownloadOnlyMime || hasDownloadOnlyUri;
     }
 
-    private void NavigationDidStart()
+    private void NavigationDidStart(IntPtr navigation)
     {
+        if (IsSupersededNavigation(navigation))
+        {
+            TraceDownload("navigation.did-start.superseded", $"navigation=0x{navigation.ToInt64():X}");
+            return;
+        }
+
+        _currentNavigationHandle = navigation;
+        _acceptedNavigationAwaitingStart = false;
         var uri = ResolveWebViewUri() ?? _lastNavigationUri ?? _pendingNavigationUri;
         TraceDownload("navigation.did-start", uri?.AbsoluteUri ?? "<null>");
         ClearPendingNavigation(uri);
@@ -1726,8 +1747,16 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         RaiseNavigationHistoryChanged();
     }
 
-    private void NavigationDidFinish()
+    private void NavigationDidFinish(IntPtr navigation)
     {
+        if (IsSupersededNavigation(navigation))
+        {
+            TraceDownload("navigation.did-finish.superseded", $"navigation=0x{navigation.ToInt64():X}");
+            return;
+        }
+
+        _currentNavigationHandle = IntPtr.Zero;
+        _acceptedNavigationAwaitingStart = false;
         var uri = ResolveWebViewUri() ?? _lastNavigationUri ?? _pendingNavigationUri;
         TraceDownload("navigation.did-finish", uri?.AbsoluteUri ?? "<null>");
         ClearPendingNavigation(uri);
@@ -1740,8 +1769,18 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         RaiseNavigationHistoryChanged();
     }
 
-    private void NavigationDidFail(IntPtr error)
+    private void NavigationDidFail(IntPtr navigation, IntPtr error)
     {
+        if (IsSupersededNavigation(navigation))
+        {
+            TraceDownload(
+                "navigation.did-fail.superseded",
+                $"navigation=0x{navigation.ToInt64():X}, error={ResolveErrorCode(error) ?? "<null>"}");
+            return;
+        }
+
+        _currentNavigationHandle = IntPtr.Zero;
+        _acceptedNavigationAwaitingStart = false;
         var uri = ResolveWebViewUri() ?? _lastNavigationUri ?? _pendingNavigationUri;
         TraceDownload("navigation.did-fail", $"{uri?.AbsoluteUri ?? "<null>"}, error={ResolveErrorCode(error) ?? "<null>"}");
         ClearPendingNavigation(uri);
@@ -1758,6 +1797,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
 
         RaiseNavigationHistoryChanged();
     }
+
+    private bool IsSupersededNavigation(IntPtr navigation) =>
+        navigation != IntPtr.Zero &&
+        _currentNavigationHandle != IntPtr.Zero &&
+        navigation != _currentNavigationHandle;
 
     private void ClearPendingNavigation(Uri? uri)
     {
@@ -4876,24 +4920,21 @@ internal sealed class MacOSNativeWebViewHost : IDisposable
         {
             _ = selector;
             _ = webView;
-            _ = navigation;
-            GetOwner(self)?.NavigationDidStart();
+            GetOwner(self)?.NavigationDidStart(navigation);
         }
 
         private static void DidFinishNavigation(IntPtr self, IntPtr selector, IntPtr webView, IntPtr navigation)
         {
             _ = selector;
             _ = webView;
-            _ = navigation;
-            GetOwner(self)?.NavigationDidFinish();
+            GetOwner(self)?.NavigationDidFinish(navigation);
         }
 
         private static void DidFailNavigation(IntPtr self, IntPtr selector, IntPtr webView, IntPtr navigation, IntPtr error)
         {
             _ = selector;
             _ = webView;
-            _ = navigation;
-            GetOwner(self)?.NavigationDidFail(error);
+            GetOwner(self)?.NavigationDidFail(navigation, error);
         }
 
         private static void DecideDestination(IntPtr self, IntPtr selector, IntPtr download, IntPtr response, IntPtr suggestedFilename, IntPtr completionHandler)
