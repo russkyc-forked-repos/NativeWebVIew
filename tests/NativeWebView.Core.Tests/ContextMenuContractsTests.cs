@@ -1,4 +1,5 @@
 using System.Text;
+using NativeWebView.Controls;
 using NativeWebView.Core;
 
 namespace NativeWebView.Core.Tests;
@@ -40,10 +41,49 @@ public sealed class ContextMenuContractsTests
     }
 
     [Fact]
-    public void NativeWebView_ForwardsCommandWithControlAsSender()
+    public void NativeWebView_ForwardsRequestWithDerivedControlAsSenderAndPreservesMutableArgs()
     {
         using var backend = new ContextMenuBackend();
-        using var webView = new Controls.NativeWebView(backend);
+        using var instance = new NativeWebViewInstance(backend);
+        var target = new NativeWebViewContextMenuTarget("target", true, new Uri("https://example.com/login"));
+        object? controllerSender = null;
+        NativeWebViewContextMenuRequestedEventArgs? controllerArgs = null;
+        instance.Controller.ContextMenuRequested += (sender, args) =>
+        {
+            controllerSender = sender;
+            controllerArgs = args;
+        };
+        using var webView = new DerivedNativeWebView(instance);
+        object? controlSender = null;
+        NativeWebViewContextMenuRequestedEventArgs? controlArgs = null;
+        webView.ContextMenuRequested += (sender, args) =>
+        {
+            controlSender = sender;
+            controlArgs = args;
+            args.AdditionalItems.Add(new NativeWebViewContextMenuItem("username", "Username"));
+            args.Handled = true;
+        };
+
+        var backendArgs = backend.Request(12, 34, target);
+
+        Assert.Same(instance.Controller, controllerSender);
+        Assert.Same(webView, controlSender);
+        Assert.Same(backendArgs, controllerArgs);
+        Assert.Same(controllerArgs, controlArgs);
+        Assert.NotNull(controlArgs);
+        Assert.Equal(12, controlArgs.X);
+        Assert.Equal(34, controlArgs.Y);
+        Assert.Same(target, controlArgs.Target);
+        Assert.True(controlArgs.Handled);
+        Assert.Single(controlArgs.AdditionalItems);
+    }
+
+    [Fact]
+    public void NativeWebView_ForwardsCommandWithDerivedControlAsSender()
+    {
+        using var backend = new ContextMenuBackend();
+        using var instance = new NativeWebViewInstance(backend);
+        using var webView = new DerivedNativeWebView(instance);
         object? sender = null;
         var target = new NativeWebViewContextMenuTarget("target", true);
         webView.ContextMenuCommandInvoked += (source, _) => sender = source;
@@ -51,6 +91,43 @@ public sealed class ContextMenuContractsTests
         backend.Invoke("username", target);
 
         Assert.Same(webView, sender);
+    }
+
+    [Fact]
+    public void NativeWebView_ContextMenuRequestsDoNotCrossControlInstances()
+    {
+        using var firstBackend = new ContextMenuBackend();
+        using var firstWebView = new Controls.NativeWebView(firstBackend);
+        using var secondBackend = new ContextMenuBackend();
+        using var secondWebView = new Controls.NativeWebView(secondBackend);
+        var firstCount = 0;
+        var secondCount = 0;
+        firstWebView.ContextMenuRequested += (_, _) => firstCount++;
+        secondWebView.ContextMenuRequested += (_, _) => secondCount++;
+
+        firstBackend.Request(1, 2);
+
+        Assert.Equal(1, firstCount);
+        Assert.Equal(0, secondCount);
+    }
+
+    [Fact]
+    public void NativeWebView_DetachesContextMenuForwardersWhenDisposed()
+    {
+        using var backend = new ContextMenuBackend();
+        using var instance = new NativeWebViewInstance(backend);
+        var webView = new Controls.NativeWebView(instance);
+        var requestCount = 0;
+        var commandCount = 0;
+        webView.ContextMenuRequested += (_, _) => requestCount++;
+        webView.ContextMenuCommandInvoked += (_, _) => commandCount++;
+
+        webView.Dispose();
+        backend.Request(1, 2);
+        backend.Invoke("username", new NativeWebViewContextMenuTarget("target", true));
+
+        Assert.Equal(0, requestCount);
+        Assert.Equal(0, commandCount);
     }
 
     [Fact]
@@ -141,8 +218,17 @@ public sealed class ContextMenuContractsTests
         : NativeWebViewBackendStubBase(
             NativeWebViewPlatform.Unknown,
             new WebViewPlatformFeatures(NativeWebViewPlatform.Unknown, NativeWebViewFeature.ContextMenu)),
+          INativeWebViewBackend,
           INativeWebViewContextMenuBackend
     {
+        private event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? Requested;
+
+        event EventHandler<NativeWebViewContextMenuRequestedEventArgs>? INativeWebViewBackend.ContextMenuRequested
+        {
+            add => Requested += value;
+            remove => Requested -= value;
+        }
+
         public event EventHandler<NativeWebViewContextMenuCommandInvokedEventArgs>? ContextMenuCommandInvoked;
         public string? InsertedText { get; private set; }
 
@@ -157,5 +243,17 @@ public sealed class ContextMenuContractsTests
 
         public void Invoke(string commandId, NativeWebViewContextMenuTarget target) =>
             ContextMenuCommandInvoked?.Invoke(this, new NativeWebViewContextMenuCommandInvokedEventArgs(commandId, target));
+
+        public NativeWebViewContextMenuRequestedEventArgs Request(
+            double x,
+            double y,
+            NativeWebViewContextMenuTarget? target = null)
+        {
+            var args = new NativeWebViewContextMenuRequestedEventArgs(x, y, target);
+            Requested?.Invoke(this, args);
+            return args;
+        }
     }
+
+    private sealed class DerivedNativeWebView(NativeWebViewInstance instance) : Controls.NativeWebView(instance);
 }
