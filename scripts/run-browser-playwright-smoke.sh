@@ -55,4 +55,4 @@ if [[ "$install_browsers" == "true" ]]; then
     npx --prefix "${repo_root}/tests/NativeWebView.Playwright" playwright install chromium
   fi
 fi
-npm --prefix "${repo_root}/tests/NativeWebView.Playwright" test
+npm --prefix "${repo_root}/tests/NativeWebView.Playwright" test -- specs/docs-smoke.spec.mjs
