@@ -2312,6 +2312,10 @@ public sealed class LinuxNativeWebViewBackend
             throw new InvalidOperationException("GTK did not expose a realized GDK window for the Linux host.");
         }
 
+        // This window is embedded beneath an Avalonia X11 host. It must not wait
+        // for frame acknowledgements from a window manager that does not manage it.
+        LinuxNativeInterop.gdk_x11_window_set_frame_sync_enabled(gdkWindow, false);
+
         var xid = LinuxNativeInterop.gdk_x11_window_get_xid(gdkWindow);
         if (xid == IntPtr.Zero)
         {
