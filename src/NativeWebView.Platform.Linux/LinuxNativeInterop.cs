@@ -536,6 +536,9 @@ internal static class LinuxNativeInterop
     [DllImport(GdkName)]
     internal static extern IntPtr gdk_x11_window_get_xid(IntPtr window);
 
+    [DllImport(GdkName)]
+    internal static extern void gdk_x11_window_set_frame_sync_enabled(IntPtr window, bool frameSyncEnabled);
+
     [DllImport(X11Name)]
     private static extern int XReparentWindow(
         IntPtr display,
