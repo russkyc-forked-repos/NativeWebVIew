@@ -22,6 +22,9 @@ internal sealed class MacOSDirectProxyContextRegistry
     private readonly string? _lockDirectory;
     private readonly Dictionary<Guid, Context> _persistent = [];
     private readonly object _gate = new();
+    // Uncertain native releases cannot safely be retried. Root even private contexts
+    // for the process lifetime so GC cannot release their endpoint or profile lock.
+    private static readonly System.Collections.Concurrent.ConcurrentBag<Context> QuarantinedContexts = [];
 
     internal MacOSDirectProxyContextRegistry(IMacOSDirectStoreFactory factory, string? lockDirectory = null)
     {
@@ -58,7 +61,9 @@ internal sealed class MacOSDirectProxyContextRegistry
             if (key is { } id && _persistent.TryGetValue(id, out var existing))
             {
                 if (!existing.Forwarder.IsHealthy)
-                    throw new InvalidOperationException("The Direct proxy context is unavailable. Dispose its owners before recreating it.");
+                    throw new InvalidOperationException(existing.Quarantined
+                        ? "The Direct proxy context had a native cleanup failure. Restart the application before reusing this profile."
+                        : "The Direct proxy context is unavailable. Dispose its owners before recreating it.");
                 existing.Owners++;
                 return new Lease(this, existing);
             }
@@ -105,17 +110,33 @@ internal sealed class MacOSDirectProxyContextRegistry
         _factory.VerifyAccess();
         lock (_gate)
         {
-            if (--context.Owners != 0)
+            if (--context.Owners != 0 || context.Quarantined)
                 return;
             try { _factory.Release(context.Store); }
-            finally
+            catch
             {
-                if (context.Key is { } key)
-                    _persistent.Remove(key);
-                // Cancellation/listener close starts synchronously. Socket draining does not need AppKit.
-                ObserveShutdown(context.Forwarder.DisposeAsync().AsTask());
-                context.ProfileLock?.Dispose();
+                Quarantine(context);
+                throw;
             }
+            if (context.Key is { } key)
+                _persistent.Remove(key);
+            // Cancellation/listener close starts synchronously. Socket draining does not need AppKit.
+            ObserveShutdown(context.Forwarder.DisposeAsync().AsTask());
+            context.ProfileLock?.Dispose();
+        }
+    }
+
+    private void Quarantine(Context context)
+    {
+        _factory.VerifyAccess();
+        lock (_gate)
+        {
+            if (context.Quarantined)
+                return;
+            context.Quarantined = true;
+            QuarantinedContexts.Add(context);
+            context.Forwarder.FailClosed();
+            Trace.TraceError("NativeWebView Direct context retained after native cleanup failure; application restart required.");
         }
     }
 
@@ -132,6 +153,7 @@ internal sealed class MacOSDirectProxyContextRegistry
         internal readonly DirectSocksForwarder Forwarder = forwarder;
         internal readonly FileStream? ProfileLock = profileLock;
         internal int Owners = 1;
+        internal bool Quarantined;
     }
 
     internal sealed class Lease(MacOSDirectProxyContextRegistry registry, Context context) : IDisposable
@@ -139,6 +161,14 @@ internal sealed class MacOSDirectProxyContextRegistry
         private bool _disposed;
         internal IntPtr Store => context.Store;
         internal int Port => context.Forwarder.Port;
+        internal void RetainAfterCleanupFailure()
+        {
+            registry._factory.VerifyAccess();
+            if (_disposed)
+                return;
+            registry.Quarantine(context);
+            Dispose(); // Drop the lease count, but quarantine prevents native/endpoint release.
+        }
         public void Dispose()
         {
             registry._factory.VerifyAccess();

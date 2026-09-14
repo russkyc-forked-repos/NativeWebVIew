@@ -11,8 +11,11 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
 {
     private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
     private readonly CancellationTokenSource _stopping = new();
+    private readonly CancellationTokenSource _tunnelsStopping = new();
     private readonly ConcurrentDictionary<long, Task> _clients = new();
     private readonly SemaphoreSlim _slots;
+    private readonly SemaphoreSlim _handshakeSlots;
+    private readonly Func<TcpListener, CancellationToken, ValueTask<TcpClient>> _accept;
     private readonly byte[] _username;
     private readonly byte[] _password;
     private readonly TimeSpan _timeout;
@@ -20,11 +23,18 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
     private readonly object _disposeGate = new();
     private Task? _disposal;
     private long _sequence;
+    private int _state; // 0: forwarding, 1: failed but port retained, 2: disposing
 
-    internal DirectSocksForwarder(int maxConnections = 128, TimeSpan? timeout = null)
+    internal DirectSocksForwarder(int maxConnections = 128, TimeSpan? timeout = null,
+        int maxPendingHandshakes = 16,
+        Func<TcpListener, CancellationToken, ValueTask<TcpClient>>? accept = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxConnections);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxPendingHandshakes);
         _slots = new SemaphoreSlim(maxConnections, maxConnections);
+        var handshakes = Math.Min(maxConnections, maxPendingHandshakes);
+        _handshakeSlots = new SemaphoreSlim(handshakes, handshakes);
+        _accept = accept ?? ((listener, token) => listener.AcceptTcpClientAsync(token));
         _timeout = timeout ?? TimeSpan.FromSeconds(5);
         Username = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         Password = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
@@ -32,6 +42,7 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
         _password = Encoding.ASCII.GetBytes(Password);
         try
         {
+            _listener.ExclusiveAddressUse = true;
             _listener.Start(maxConnections);
             Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
             _accepting = AcceptAsync();
@@ -40,6 +51,8 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
         {
             _listener.Stop();
             _slots.Dispose();
+            _handshakeSlots.Dispose();
+            _tunnelsStopping.Dispose();
             _stopping.Dispose();
             throw;
         }
@@ -48,7 +61,20 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
     internal int Port { get; }
     internal string Username { get; }
     internal string Password { get; }
-    internal bool IsHealthy => !_stopping.IsCancellationRequested && !_accepting.IsCompleted;
+    internal bool IsHealthy => Volatile.Read(ref _state) == 0 && !_accepting.IsCompleted;
+
+    internal void FailClosed()
+    {
+        lock (_disposeGate)
+        {
+            if (_state != 0)
+                return;
+            Volatile.Write(ref _state, 1);
+            // SOCKS authenticates the client, not the server. Keep the original socket
+            // bound until the native owners release it; never open a port-takeover window.
+            _tunnelsStopping.Cancel();
+        }
+    }
 
     private async Task AcceptAsync()
     {
@@ -56,9 +82,27 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
         {
             while (!_stopping.IsCancellationRequested)
             {
-                var client = await _listener.AcceptTcpClientAsync(_stopping.Token).ConfigureAwait(false);
+                TcpClient client;
+                try
+                {
+                    client = await _accept(_listener, _stopping.Token).ConfigureAwait(false);
+                }
+                catch (SocketException) when (!_stopping.IsCancellationRequested)
+                {
+                    FailClosed();
+                    // Resource exhaustion can prevent accepting even just to reject.
+                    // Retry at a bounded rate using the SAME bound listener.
+                    await Task.Delay(TimeSpan.FromMilliseconds(100), _stopping.Token).ConfigureAwait(false);
+                    continue;
+                }
+                if (Volatile.Read(ref _state) != 0 || !_handshakeSlots.Wait(0))
+                {
+                    client.Dispose();
+                    continue;
+                }
                 if (!_slots.Wait(0))
                 {
+                    _handshakeSlots.Release();
                     client.Dispose();
                     continue;
                 }
@@ -70,15 +114,23 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
         }
         catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException)
         {
-            // A failed listener is not restarted beneath live stores. Cancel tunnels and leave the native route intact.
-            _stopping.Cancel();
-            _listener.Stop();
+            // Final disposal alone releases the listener. Even if the accept loop cannot
+            // continue, do not voluntarily release the endpoint beneath live native owners.
+            FailClosed();
         }
     }
 
     private async Task HandleTrackedAsync(long id, TcpClient client, TaskCompletionSource completion)
     {
-        try { await HandleAsync(client).ConfigureAwait(false); }
+        var authenticationPending = true;
+        void ReleaseHandshakeSlot()
+        {
+            if (!authenticationPending)
+                return;
+            authenticationPending = false;
+            _handshakeSlots.Release();
+        }
+        try { await HandleAsync(client, ReleaseHandshakeSlot).ConfigureAwait(false); }
         catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException or ArgumentException)
         {
             // Connection failures belong to this tunnel and surface through the socket to WebKit.
@@ -86,6 +138,7 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
         finally
         {
             client.Dispose();
+            ReleaseHandshakeSlot();
             _slots.Release();
             completion.TrySetResult();
             _clients.TryRemove(id, out _);
@@ -113,9 +166,9 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
         return stream.WriteAsync(message, token);
     }
 
-    private async Task HandleAsync(TcpClient client)
+    private async Task HandleAsync(TcpClient client, Action authenticated)
     {
-        using var handshake = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+        using var handshake = CancellationTokenSource.CreateLinkedTokenSource(_tunnelsStopping.Token);
         using var outbound = new TcpClient();
         handshake.CancelAfter(_timeout);
         var token = handshake.Token;
@@ -155,6 +208,7 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
         await stream.WriteAsync(new byte[] { 1, valid ? (byte)0 : (byte)1 }, token).ConfigureAwait(false);
         if (!valid)
             return;
+        authenticated();
 
         var header = await ReadAsync(stream, 4, token).ConfigureAwait(false);
         if (header[0] != 5 || header[2] != 0)
@@ -189,7 +243,7 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
         var portBytes = await ReadAsync(stream, 2, token).ConfigureAwait(false);
         var port = (portBytes[0] << 8) | portBytes[1];
         handshake.CancelAfter(Timeout.InfiniteTimeSpan);
-        using var connect = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+        using var connect = CancellationTokenSource.CreateLinkedTokenSource(_tunnelsStopping.Token);
         connect.CancelAfter(_timeout);
         try
         {
@@ -206,18 +260,18 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
                 SocketError.HostNotFound or SocketError.HostUnreachable => (byte)4,
                 _ => (byte)1,
             };
-            using var reply = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+            using var reply = CancellationTokenSource.CreateLinkedTokenSource(_tunnelsStopping.Token);
             reply.CancelAfter(TimeSpan.FromSeconds(1));
             await ReplyAsync(stream, code, reply.Token).ConfigureAwait(false);
             return;
         }
-        using (var reply = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token))
+        using (var reply = CancellationTokenSource.CreateLinkedTokenSource(_tunnelsStopping.Token))
         {
             reply.CancelAfter(TimeSpan.FromSeconds(1));
             await ReplyAsync(stream, 0, reply.Token, (IPEndPoint)outbound.Client.LocalEndPoint!).ConfigureAwait(false);
         }
         client.NoDelay = outbound.NoDelay = true;
-        using var relay = CancellationTokenSource.CreateLinkedTokenSource(_stopping.Token);
+        using var relay = CancellationTokenSource.CreateLinkedTokenSource(_tunnelsStopping.Token);
         async Task PumpAsync(NetworkStream from, NetworkStream to, Socket destination)
         {
             var buffer = new byte[32 * 1024];
@@ -250,6 +304,8 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
 
     private async Task StopAsync()
     {
+        Volatile.Write(ref _state, 2);
+        _tunnelsStopping.Cancel();
         _stopping.Cancel();
         _listener.Stop();
         await _accepting.ConfigureAwait(false);
@@ -257,6 +313,8 @@ internal sealed class DirectSocksForwarder : IAsyncDisposable
         CryptographicOperations.ZeroMemory(_username);
         CryptographicOperations.ZeroMemory(_password);
         _slots.Dispose();
+        _handshakeSlots.Dispose();
+        _tunnelsStopping.Dispose();
         _stopping.Dispose();
     }
 }

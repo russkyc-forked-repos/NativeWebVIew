@@ -8,6 +8,151 @@ namespace NativeWebView.Core.Tests;
 
 public sealed class DirectSocksForwarderTests
 {
+    internal static void AssertEndpointReserved(int port)
+    {
+        using var competitor = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        competitor.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        Assert.Throws<SocketException>(() =>
+        {
+            competitor.Bind(new IPEndPoint(IPAddress.Loopback, port));
+            competitor.Listen(1);
+        });
+    }
+
+    private static async Task AssertClosedAsync(NetworkStream stream)
+    {
+        try { Assert.Equal(0, await stream.ReadAsync(new byte[1]).AsTask().WaitAsync(TimeSpan.FromSeconds(3))); }
+        catch (IOException) { } // A prompt TCP reset is also a rejection.
+    }
+
+    [Fact]
+    public async Task FailedService_ReservesEndpointCancelsTunnelsAndRejectsNewClients()
+    {
+        await using var proxy = new DirectSocksForwarder();
+        using var origin = new TcpListener(IPAddress.Loopback, 0);
+        origin.Start();
+        using var client = await AuthenticateAsync(proxy);
+        Assert.Equal(0, await ConnectAsync(client, "127.0.0.1", ((IPEndPoint)origin.LocalEndpoint).Port, 1));
+        using var peer = await origin.AcceptTcpClientAsync();
+        AssertEndpointReserved(proxy.Port);
+        proxy.FailClosed();
+        proxy.FailClosed();
+        Assert.False(proxy.IsHealthy);
+        AssertEndpointReserved(proxy.Port);
+        await AssertClosedAsync(client.GetStream());
+        await AssertClosedAsync(peer.GetStream());
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            using var rejected = new TcpClient();
+            await rejected.ConnectAsync(IPAddress.Loopback, proxy.Port);
+            await AssertClosedAsync(rejected.GetStream());
+            AssertEndpointReserved(proxy.Port);
+        }
+    }
+
+    [Fact]
+    public async Task AcceptFailure_UsesSameBoundEndpointAndDoesNotResumeForwarding()
+    {
+        var failNextAccept = 0;
+        await using var proxy = new DirectSocksForwarder(accept: (listener, token) =>
+        {
+            if (Interlocked.Exchange(ref failNextAccept, 0) != 0)
+                throw new SocketException((int)SocketError.TooManyOpenSockets);
+            return listener.AcceptTcpClientAsync(token);
+        });
+        Interlocked.Exchange(ref failNextAccept, 1);
+        using var trigger = new TcpClient();
+        await trigger.ConnectAsync(IPAddress.Loopback, proxy.Port);
+        await AssertClosedAsync(trigger.GetStream());
+        Assert.False(proxy.IsHealthy);
+        AssertEndpointReserved(proxy.Port);
+        using var rejected = new TcpClient();
+        await rejected.ConnectAsync(IPAddress.Loopback, proxy.Port);
+        await AssertClosedAsync(rejected.GetStream());
+        AssertEndpointReserved(proxy.Port);
+    }
+
+    [Fact]
+    public async Task PersistentAcceptFailure_BacksOffWhileKeepingEndpointReserved()
+    {
+        var attempts = 0;
+        await using var proxy = new DirectSocksForwarder(accept: (_, _) =>
+        {
+            Interlocked.Increment(ref attempts);
+            throw new SocketException((int)SocketError.TooManyOpenSockets);
+        });
+        Assert.False(proxy.IsHealthy);
+        AssertEndpointReserved(proxy.Port);
+        await Task.Delay(350);
+        Assert.InRange(Volatile.Read(ref attempts), 1, 10);
+        AssertEndpointReserved(proxy.Port);
+        await proxy.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task UnauthenticatedFlood_IsBoundedAndEstablishedTunnelRemainsUsable()
+    {
+        await using var proxy = new DirectSocksForwarder(maxConnections: 4,
+            maxPendingHandshakes: 2, timeout: TimeSpan.FromSeconds(2));
+        using var origin = new TcpListener(IPAddress.Loopback, 0);
+        origin.Start();
+        using var active = await AuthenticateAsync(proxy);
+        Assert.Equal(0, await ConnectAsync(active, "127.0.0.1", ((IPEndPoint)origin.LocalEndpoint).Port, 1));
+        using var peer = await origin.AcceptTcpClientAsync();
+        using var pendingOne = new TcpClient();
+        using var pendingTwo = new TcpClient();
+        foreach (var pending in new[] { pendingOne, pendingTwo })
+        {
+            await pending.ConnectAsync(IPAddress.Loopback, proxy.Port);
+            await pending.GetStream().WriteAsync(new byte[] { 5, 1, 2 });
+            Assert.Equal(new byte[] { 5, 2 }, await ReadAsync(pending.GetStream(), 2));
+        }
+        for (var attempt = 0; attempt < 16; attempt++)
+        {
+            using var excess = new TcpClient();
+            await excess.ConnectAsync(IPAddress.Loopback, proxy.Port);
+            await AssertClosedAsync(excess.GetStream());
+            await active.GetStream().WriteAsync(new byte[] { (byte)attempt });
+            Assert.Equal(new byte[] { (byte)attempt }, await ReadAsync(peer.GetStream(), 1));
+        }
+        await AssertClosedAsync(pendingOne.GetStream());
+        await AssertClosedAsync(pendingTwo.GetStream());
+        using var recovered = await AuthenticateAsync(proxy);
+        Assert.Equal(0, await ConnectAsync(recovered, "127.0.0.1", ((IPEndPoint)origin.LocalEndpoint).Port, 1));
+        using var recoveredPeer = await origin.AcceptTcpClientAsync();
+        Assert.True(proxy.IsHealthy);
+    }
+
+    [Fact]
+    public async Task AuthenticatedConnections_ReleaseHandshakeCapacityButRespectTotalLimit()
+    {
+        await using var proxy = new DirectSocksForwarder(maxConnections: 2, maxPendingHandshakes: 1);
+        using var origin = new TcpListener(IPAddress.Loopback, 0);
+        origin.Start();
+        using var first = await AuthenticateAsync(proxy);
+        Assert.Equal(0, await ConnectAsync(first, "127.0.0.1", ((IPEndPoint)origin.LocalEndpoint).Port, 1));
+        using var firstPeer = await origin.AcceptTcpClientAsync();
+        using var second = await AuthenticateAsync(proxy);
+        Assert.Equal(0, await ConnectAsync(second, "127.0.0.1", ((IPEndPoint)origin.LocalEndpoint).Port, 1));
+        using var secondPeer = await origin.AcceptTcpClientAsync();
+        using var excess = new TcpClient();
+        await excess.ConnectAsync(IPAddress.Loopback, proxy.Port);
+        await AssertClosedAsync(excess.GetStream());
+    }
+
+    [Fact]
+    public async Task FailureAndDisposalRace_CompletesAndReleasesPort()
+    {
+        var proxy = new DirectSocksForwarder();
+        var port = proxy.Port;
+        await Task.WhenAll(Task.Run(proxy.FailClosed), Task.Run(async () => await proxy.DisposeAsync()))
+            .WaitAsync(TimeSpan.FromSeconds(3));
+        proxy.FailClosed();
+        using var next = new TcpListener(IPAddress.Loopback, port);
+        next.ExclusiveAddressUse = true;
+        next.Start();
+    }
+
     private static async Task<byte[]> ReadAsync(NetworkStream stream, int count)
     {
         var bytes = new byte[count];

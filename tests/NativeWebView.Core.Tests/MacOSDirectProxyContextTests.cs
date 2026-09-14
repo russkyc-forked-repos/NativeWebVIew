@@ -1,4 +1,5 @@
 using NativeWebView.Interop;
+using NativeWebView.Controls;
 
 namespace NativeWebView.Core.Tests;
 
@@ -113,14 +114,137 @@ public sealed class MacOSDirectProxyContextTests
     }
 
     [Fact]
-    public async Task FailedService_IsNotReplacedUnderExistingOwners()
+    public void FailedService_IsNotReplacedOrUnboundUntilFinalNativeOwnerReleases()
     {
         var factory = new Factory();
         var registry = Registry(factory);
         using var owner = registry.Acquire(Configuration());
-        await factory.LastForwarder!.DisposeAsync();
+        using var sharedOwner = registry.Acquire(Configuration());
+        var port = owner.Port;
+        factory.LastForwarder!.FailClosed();
+        DirectSocksForwarderTests.AssertEndpointReserved(port);
         Assert.Throws<InvalidOperationException>(() => registry.Acquire(Configuration()));
         Assert.Equal(1, factory.Created);
+        owner.Dispose();
+        DirectSocksForwarderTests.AssertEndpointReserved(port);
+        factory.OnRelease = () => DirectSocksForwarderTests.AssertEndpointReserved(port);
+        sharedOwner.Dispose();
+        Assert.Equal(1, factory.Released);
+        using var replacement = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
+        replacement.Start();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StoreReleaseFailure_QuarantinesEndpointAndNeverRetriesNativeRelease(bool isPrivate)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "NativeWebView.Direct.Tests", Guid.NewGuid().ToString("N"));
+        var releaseAttempts = 0;
+        var error = new InvalidOperationException("injected store release failure");
+        var factory = new Factory { OnRelease = () => { releaseAttempts++; throw error; } };
+        var registry = new MacOSDirectProxyContextRegistry(factory, directory);
+        var configuration = Configuration(isPrivate: isPrivate);
+        var lease = registry.Acquire(configuration);
+        var port = lease.Port;
+
+        Assert.Same(error, Assert.Throws<InvalidOperationException>(lease.Dispose));
+        lease.Dispose();
+        lease.RetainAfterCleanupFailure();
+        Assert.Equal(1, releaseAttempts);
+        Assert.Equal(0, factory.Released);
+        Assert.False(factory.LastForwarder!.IsHealthy);
+        DirectSocksForwarderTests.AssertEndpointReserved(port);
+        if (!isPrivate)
+        {
+            Assert.Contains("Restart", Assert.Throws<InvalidOperationException>(() => registry.Acquire(configuration)).Message);
+            var competitor = new MacOSDirectProxyContextRegistry(new Factory(), directory);
+            Assert.Throws<InvalidOperationException>(() => competitor.Acquire(configuration));
+        }
+        else
+        {
+            // Independent private stores are still usable after another store is quarantined.
+            using var next = new MacOSDirectProxyContextRegistry(new Factory(), directory).Acquire(configuration);
+            Assert.NotEqual(port, next.Port);
+        }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HostCleanupFailure_RetainsSharedRouteAndProfileLockAfterAllLeasesDispose(bool critical)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "NativeWebView.Direct.Tests", Guid.NewGuid().ToString("N"));
+        var factory = new Factory();
+        var registry = new MacOSDirectProxyContextRegistry(factory, directory);
+        var lease = registry.Acquire(Configuration());
+        using var otherOwner = registry.Acquire(Configuration());
+        var cleanup = new MacOSNativeWebViewHost.NativeResourceCleanupCoordinator();
+        cleanup.RegisterDirectProxyLease(lease);
+        var managedReleased = false;
+        cleanup.RegisterManagedOwnerRelease(() => managedReleased = true);
+        var error = new InvalidOperationException("injected native cleanup failure");
+        cleanup.Register(() => throw error, critical
+            ? MacOSNativeWebViewHost.NativeResourceCleanupFailureRisk.ManagedOwnerMayRemainReachable
+            : MacOSNativeWebViewHost.NativeResourceCleanupFailureRisk.None);
+
+        var result = cleanup.Rollback();
+        Assert.Same(error, Assert.Single(result.Exceptions));
+        Assert.Equal(critical, result.ManagedOwnerHandleRetained);
+        Assert.Equal(!critical, managedReleased);
+        Assert.False(factory.LastForwarder!.IsHealthy);
+        DirectSocksForwarderTests.AssertEndpointReserved(lease.Port);
+        otherOwner.Dispose();
+        lease.Dispose();
+        Assert.Equal(0, factory.Released);
+        Assert.Equal(MacOSNativeWebViewHost.NativeResourceCleanupResult.Empty, cleanup.Rollback());
+        DirectSocksForwarderTests.AssertEndpointReserved(lease.Port);
+        Assert.Throws<InvalidOperationException>(() => registry.Acquire(Configuration()));
+        var competitor = new MacOSDirectProxyContextRegistry(new Factory(), directory);
+        Assert.Throws<InvalidOperationException>(() => competitor.Acquire(Configuration()));
+    }
+
+    [Fact]
+    public void HostCleanup_ReportsStoreReleaseFailureAndRetainsEndpoint()
+    {
+        var error = new InvalidOperationException("injected store release failure");
+        var factory = new Factory { OnRelease = () => throw error };
+        var registry = Registry(factory);
+        var lease = registry.Acquire(Configuration());
+        var cleanup = new MacOSNativeWebViewHost.NativeResourceCleanupCoordinator();
+        cleanup.RegisterDirectProxyLease(lease);
+        Assert.Same(error, Assert.Single(cleanup.Rollback().Exceptions));
+        Assert.False(factory.LastForwarder!.IsHealthy);
+        DirectSocksForwarderTests.AssertEndpointReserved(lease.Port);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void HostCleanup_ReleasesRouteOnlyAfterSuccessfulTeardown_OrLeavesOwnershipOnCommit(bool commit)
+    {
+        var factory = new Factory();
+        var registry = Registry(factory);
+        using var lease = registry.Acquire(Configuration());
+        var cleanup = new MacOSNativeWebViewHost.NativeResourceCleanupCoordinator();
+        cleanup.RegisterDirectProxyLease(lease);
+        var nativeReleased = false;
+        cleanup.Register(() =>
+        {
+            DirectSocksForwarderTests.AssertEndpointReserved(lease.Port);
+            nativeReleased = true;
+        });
+        if (commit)
+            cleanup.Commit();
+        Assert.Empty(cleanup.Rollback().Exceptions);
+        Assert.Equal(!commit, nativeReleased);
+        Assert.Equal(commit ? 0 : 1, factory.Released);
+        if (commit)
+            DirectSocksForwarderTests.AssertEndpointReserved(lease.Port);
+        lease.Dispose();
+        Assert.Equal(1, factory.Released);
+        using var replacement = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, lease.Port);
+        replacement.Start();
     }
 
     private static MacOSDirectProxyContextRegistry Registry(Factory factory) => new(factory,
@@ -132,6 +256,7 @@ public sealed class MacOSDirectProxyContextTests
         internal bool FailCreation;
         internal Guid? LastIdentifier;
         internal DirectSocksForwarder? LastForwarder;
+        internal Action? OnRelease;
         public void VerifyAccess() { }
         public string GetLockDirectory() => MacOSDirectProxyContextRegistry.GetLockDirectory(
             libraryDirectory ?? throw new InvalidOperationException("Tests must specify a lock directory."), applicationIdentifier);
@@ -143,6 +268,10 @@ public sealed class MacOSDirectProxyContextTests
             if (FailCreation) throw new InvalidOperationException("injected allocation failure");
             return (IntPtr)Created;
         }
-        public void Release(IntPtr store) => Released++;
+        public void Release(IntPtr store)
+        {
+            OnRelease?.Invoke();
+            Released++;
+        }
     }
 }

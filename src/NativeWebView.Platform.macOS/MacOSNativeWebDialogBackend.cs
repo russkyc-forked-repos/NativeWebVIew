@@ -548,6 +548,25 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
 
         _disposed = true;
 
+        try
+        {
+            ReleaseNativeResources();
+            _directProxyLease?.Dispose();
+        }
+        catch
+        {
+            _directProxyLease?.RetainAfterCleanupFailure();
+            throw;
+        }
+        finally
+        {
+            _directProxyLease = null;
+            _isVisible = false;
+        }
+    }
+
+    private void ReleaseNativeResources()
+    {
         if (_useNative && ObjC.IsMainThread())
         {
             if (_windowHandle != IntPtr.Zero)
@@ -577,10 +596,6 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
 
             _contentViewHandle = IntPtr.Zero;
         }
-
-        _directProxyLease?.Dispose();
-        _directProxyLease = null;
-        _isVisible = false;
     }
 
     private MacOSDirectProxyContextRegistry.Lease? _directProxyLease;
