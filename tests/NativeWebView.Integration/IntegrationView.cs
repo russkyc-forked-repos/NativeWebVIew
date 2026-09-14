@@ -46,6 +46,8 @@ internal sealed class IntegrationView : UserControl
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Stretch,
         };
+        if (ProxyIntegrationProbe.IsEnabled)
+            _webView.InstanceConfiguration = ProxyIntegrationProbe.CreateConfiguration("embedded");
         if (_webView.Features.Supports(NativeWebViewFeature.DocumentStartScriptInjection))
         {
             _webView.InstanceConfiguration.DocumentStartScripts.Add(
@@ -136,11 +138,18 @@ internal sealed class IntegrationView : UserControl
 
         try
         {
-            await using var pages = await IntegrationPageCatalog.CreateAsync(platform, cancellationSource.Token).ConfigureAwait(true);
+            if (ProxyIntegrationProbe.IsEnabled)
+            {
+                result.Scenarios.Add(await ProxyIntegrationProbe.RunAsync(_webView, cancellationSource.Token));
+            }
+            else
+            {
+                await using var pages = await IntegrationPageCatalog.CreateAsync(platform, cancellationSource.Token).ConfigureAwait(true);
 
-            result.Scenarios.Add(await RunWebViewScenarioAsync(platform, pages, cancellationSource.Token).ConfigureAwait(true));
-            result.Scenarios.Add(await RunDialogScenarioAsync(platform, pages, cancellationSource.Token).ConfigureAwait(true));
-            result.Scenarios.Add(await RunAuthenticationScenarioAsync(platform, pages, cancellationSource.Token).ConfigureAwait(true));
+                result.Scenarios.Add(await RunWebViewScenarioAsync(platform, pages, cancellationSource.Token).ConfigureAwait(true));
+                result.Scenarios.Add(await RunDialogScenarioAsync(platform, pages, cancellationSource.Token).ConfigureAwait(true));
+                result.Scenarios.Add(await RunAuthenticationScenarioAsync(platform, pages, cancellationSource.Token).ConfigureAwait(true));
+            }
         }
         catch (Exception ex)
         {

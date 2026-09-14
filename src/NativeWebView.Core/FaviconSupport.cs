@@ -52,6 +52,7 @@ public static class NativeWebViewFaviconSupport
         """;
 
     private static readonly HttpClient HttpClient = new();
+    private static readonly Lazy<HttpClient> DirectHttpClient = new(() => new(new HttpClientHandler { UseProxy = false }));
 
     public static bool IsSvgFaviconUri(Uri? uri)
     {
@@ -93,9 +94,16 @@ public static class NativeWebViewFaviconSupport
         return null;
     }
 
-    public static async Task<NativeWebViewFavicon?> DownloadFaviconAsync(
+    public static Task<NativeWebViewFavicon?> DownloadFaviconAsync(
         Uri? uri,
         NativeWebViewFaviconFormat format,
+        CancellationToken cancellationToken = default)
+        => DownloadFaviconAsync(uri, format, noProxy: false, cancellationToken);
+
+    internal static async Task<NativeWebViewFavicon?> DownloadFaviconAsync(
+        Uri? uri,
+        NativeWebViewFaviconFormat format,
+        bool noProxy,
         CancellationToken cancellationToken = default)
     {
         if (!CanDownload(uri))
@@ -104,7 +112,7 @@ public static class NativeWebViewFaviconSupport
         }
 
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        using var response = await HttpClient.SendAsync(
+        using var response = await (noProxy ? DirectHttpClient.Value : HttpClient).SendAsync(
             request,
             HttpCompletionOption.ResponseHeadersRead,
             cancellationToken).ConfigureAwait(false);

@@ -147,6 +147,10 @@ public enum NativeWebViewPrintStatus
 
 public sealed class NativeWebViewProxyOptions
 {
+    /// <summary>Bypasses configured proxies for supported traffic. Set before initialization.</summary>
+    /// <remarks>Cannot be combined with Server, AutoConfigUrl, or BypassList. macOS uses an internal authenticated loopback forwarder and a separate storage profile.</remarks>
+    public bool NoProxy { get; set; }
+
     public string? Server { get; set; }
 
     public string? BypassList { get; set; }
@@ -157,6 +161,7 @@ public sealed class NativeWebViewProxyOptions
     {
         return new NativeWebViewProxyOptions
         {
+            NoProxy = NoProxy,
             Server = Server,
             BypassList = BypassList,
             AutoConfigUrl = AutoConfigUrl,
@@ -167,6 +172,7 @@ public sealed class NativeWebViewProxyOptions
     {
         ArgumentNullException.ThrowIfNull(options);
 
+        options.NoProxy = NoProxy;
         options.Server = Server;
         options.BypassList = BypassList;
         options.AutoConfigUrl = AutoConfigUrl;
@@ -177,7 +183,8 @@ public enum NativeWebViewProxyKind
 {
     HttpConnect = 0,
     Socks5,
-    AutoConfigUrl
+    AutoConfigUrl,
+    Direct
 }
 
 public sealed class NativeWebViewResolvedProxyConfiguration
@@ -226,6 +233,17 @@ public static class NativeWebViewProxyConfigurationResolver
         if (options is null)
         {
             return null;
+        }
+
+        if (options.NoProxy)
+        {
+            if (!string.IsNullOrWhiteSpace(options.Server) ||
+                !string.IsNullOrWhiteSpace(options.AutoConfigUrl) ||
+                !string.IsNullOrWhiteSpace(options.BypassList))
+                throw new ArgumentException("NoProxy cannot be combined with Server, AutoConfigUrl, or BypassList.", nameof(options));
+
+            return new NativeWebViewResolvedProxyConfiguration(
+                NativeWebViewProxyKind.Direct, string.Empty, 0, false, null, null, null, Array.Empty<string>());
         }
 
         var server = options.Server?.Trim();

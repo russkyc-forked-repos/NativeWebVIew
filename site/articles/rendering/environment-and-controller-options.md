@@ -6,6 +6,8 @@ title: "Environment and Controller Options"
 
 `NativeWebView` exposes two option-request events during initialization so applications can adjust backend defaults before the platform engine is created. For multi-instance hosting, use `NativeWebView.InstanceConfiguration` to seed per-instance defaults before these public handlers run.
 
+When multiple presenters share a `NativeWebViewInstance`, defaults are seeded once per option request. Live presenters contribute to the same options in registration order; later assignments to the same property take precedence. macOS retains the final options after all callbacks finish. Disposing the instance or the attaching presenter during initialization aborts native host creation.
+
 ## Environment Options Event
 
 Event: `CoreWebView2EnvironmentRequested`
@@ -21,6 +23,7 @@ Option model:
 - `AdditionalBrowserArguments`
 - `TargetCompatibleBrowserVersion`
 - `AllowSingleSignOnUsingOSPrimaryAccount`
+- `Proxy.NoProxy` (default `false`; see [Direct connections](no-proxy.md))
 - `Proxy.Server`
 - `Proxy.BypassList`
 - `Proxy.AutoConfigUrl`

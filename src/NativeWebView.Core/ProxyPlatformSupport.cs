@@ -42,6 +42,9 @@ public sealed class NativeWebViewProxyPlatformSupport
 
     public string? MinimumPlatformVersion { get; }
 
+    /// <summary>Whether this platform implements NoProxy (subject to the minimum platform version and native runtime availability).</summary>
+    public bool SupportsNoProxy => Platform is NativeWebViewPlatform.Windows or NativeWebViewPlatform.Linux or NativeWebViewPlatform.MacOS;
+
     public bool SupportsPerInstanceRuntimeApplication =>
         PlatformCapability == NativeWebViewProxyPlatformCapability.PerInstance &&
         RepositorySupport == NativeWebViewProxyRepositorySupport.RuntimeApplied;
@@ -49,6 +52,16 @@ public sealed class NativeWebViewProxyPlatformSupport
 
 public static class NativeWebViewProxyPlatformSupportMatrix
 {
+    internal static void ValidateNoProxy(NativeWebViewPlatform platform, NativeWebViewProxyOptions? options)
+    {
+        if (options?.NoProxy != true)
+            return;
+        _ = NativeWebViewProxyConfigurationResolver.Resolve(options);
+        if (!Get(platform).SupportsNoProxy ||
+            (platform == NativeWebViewPlatform.MacOS && OperatingSystem.IsMacOS() && !OperatingSystem.IsMacOSVersionAtLeast(14)))
+            throw new NotSupportedException($"NoProxy is not supported on {platform}; macOS requires version 14 or later.");
+    }
+
     public static NativeWebViewProxyPlatformSupport Get(NativeWebViewPlatform platform)
     {
         return platform switch
@@ -96,13 +109,17 @@ public static class NativeWebViewProxyPlatformSupportMatrix
 
 public sealed class NativeWebViewLinuxProxySettings
 {
-    internal NativeWebViewLinuxProxySettings(string defaultProxyUri, IReadOnlyList<string> ignoreHosts)
+    internal NativeWebViewLinuxProxySettings(string defaultProxyUri, IReadOnlyList<string> ignoreHosts, bool noProxy = false)
     {
         DefaultProxyUri = defaultProxyUri;
         IgnoreHosts = ignoreHosts;
+        NoProxy = noProxy;
     }
 
     public string DefaultProxyUri { get; }
+
+    /// <summary>Use native NoProxy with a null settings pointer; DefaultProxyUri is empty in this mode.</summary>
+    public bool NoProxy { get; }
 
     public IReadOnlyList<string> IgnoreHosts { get; }
 }
@@ -122,6 +139,9 @@ public static class NativeWebViewLinuxProxySettingsBuilder
             throw new NotSupportedException(
                 "WebKitGTK custom proxy settings do not expose a direct PAC mapping through this helper. Use an explicit proxy server or a backend-specific integration.");
         }
+
+        if (resolved.Kind == NativeWebViewProxyKind.Direct)
+            return new NativeWebViewLinuxProxySettings(string.Empty, Array.Empty<string>(), noProxy: true);
 
         if (!string.IsNullOrWhiteSpace(resolved.Username) || !string.IsNullOrWhiteSpace(resolved.Password))
         {
@@ -150,6 +170,9 @@ public static class NativeWebViewLinuxProxySettingsBuilder
 
 public static class NativeWebViewWindowsProxyArgumentsBuilder
 {
+    internal static bool HasProxySwitches(string? arguments) =>
+        !string.IsNullOrWhiteSpace(arguments) && ExistingProxySwitchPattern.IsMatch(arguments);
+
     private static readonly Regex ExistingProxySwitchPattern = new(
         @"(?:^|\s)(--proxy-server=(?:""(?:\\.|[^""])*""|[^\s]+)|--proxy-bypass-list=(?:""(?:\\.|[^""])*""|[^\s]+)|--proxy-pac-url=(?:""(?:\\.|[^""])*""|[^\s]+)|--proxy-auto-detect\b|--no-proxy-server\b)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -169,6 +192,9 @@ public static class NativeWebViewWindowsProxyArgumentsBuilder
         }
 
         var arguments = new List<string>();
+
+        if (resolved.Kind == NativeWebViewProxyKind.Direct)
+            return "--no-proxy-server";
 
         if (resolved.Kind == NativeWebViewProxyKind.AutoConfigUrl)
         {

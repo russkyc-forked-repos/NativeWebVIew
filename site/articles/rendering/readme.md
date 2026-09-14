@@ -6,4 +6,5 @@ title: "Rendering and Interop"
 
 - [Render Modes](render-modes.md)
 - [Environment and Controller Options](environment-and-controller-options.md)
+- [Direct Connections (NoProxy)](no-proxy.md)
 - [Native Handle Interop](native-handle-interop.md)

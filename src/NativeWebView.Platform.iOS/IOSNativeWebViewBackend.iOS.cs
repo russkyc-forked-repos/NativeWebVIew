@@ -254,6 +254,7 @@ public sealed class IOSNativeWebViewBackend
     public void ApplyInstanceConfiguration(NativeWebViewInstanceConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
+        NativeWebViewProxyPlatformSupportMatrix.ValidateNoProxy(Platform, configuration.EnvironmentOptions.Proxy);
         EnsureNotDisposed();
 
         _instanceConfiguration = configuration.Clone();
@@ -932,6 +933,7 @@ public sealed class IOSNativeWebViewBackend
             CoreWebView2ControllerOptionsRequested?.Invoke(this, new CoreWebViewControllerOptionsRequestedEventArgs(controllerOptions));
         }
 
+        NativeWebViewProxyPlatformSupportMatrix.ValidateNoProxy(Platform, environmentOptions.Proxy);
         _preparedEnvironmentOptions = environmentOptions.Clone();
         _preparedControllerOptions = controllerOptions.Clone();
     }

@@ -176,3 +176,7 @@ Use `NativeWebViewRenderFrameMetadataSerializer.ReadFromFileAsync` to load the s
 - [Render Modes](../rendering/render-modes.md)
 - [Environment and Controller Options](../rendering/environment-and-controller-options.md)
 - [Native Handle Interop](../rendering/native-handle-interop.md)
+
+## Direct connections
+
+Set `InstanceConfiguration.EnvironmentOptions.Proxy = new NativeWebViewProxyOptions { NoProxy = true }` before initialization/showing. Do not combine it with a server, PAC URL, or bypass list. See [NoProxy](../rendering/no-proxy.md) for platform support and profile behavior.

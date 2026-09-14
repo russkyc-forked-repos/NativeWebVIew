@@ -7,6 +7,7 @@ using System.Text.Json;
 using Avalonia.Platform;
 using Avalonia.Threading;
 using NativeWebView.Core;
+using NativeWebView.Interop;
 
 namespace NativeWebView.Controls;
 
@@ -115,6 +116,8 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
     private static readonly TimeSpan PendingNavigationRetryInterval = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan AcceptedNavigationStartTimeout = TimeSpan.FromMilliseconds(750);
     private static readonly HttpClient DownloadHttpClient = new();
+    private static readonly HttpClient DirectDownloadHttpClient = new(new HttpClientHandler { UseProxy = false });
+    private MacOSDirectProxyContextRegistry.Lease? _directProxyLease;
 
     private static class NativeSymbols
     {
@@ -828,6 +831,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
 
     public void Dispose()
     {
+        if (!ObjC.IsMainThread())
+        {
+            MacOSMainThreadDispatch.Post(Dispose);
+            return;
+        }
         if (Interlocked.Exchange(ref _disposeState, 1) != 0)
         {
             return;
@@ -879,6 +887,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
     private NativeResourceCleanupCoordinator CreateCleanupCoordinator()
     {
         var cleanup = new NativeResourceCleanupCoordinator();
+        var directProxyLease = _directProxyLease;
+        _directProxyLease = null;
+        // The route can only be released after native teardown has succeeded.
+        if (directProxyLease is not null)
+            cleanup.RegisterDirectProxyLease(directProxyLease);
         var managedHandle = _managedHandle;
         var configurationHandle = ConfigurationHandle;
         var navigationDelegateHandle = _navigationDelegateHandle;
@@ -2276,7 +2289,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
         }
     }
 
-    private static async Task TransferManagedDownloadAsync(
+    private async Task TransferManagedDownloadAsync(
         Uri uri,
         string destinationPath,
         bool allowOverwrite,
@@ -2304,7 +2317,9 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
         }
 
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        using var response = await DownloadHttpClient
+        var downloadClient = _instanceConfiguration.EnvironmentOptions.Proxy?.NoProxy == true
+            ? DirectDownloadHttpClient : DownloadHttpClient;
+        using var response = await downloadClient
             .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
             .ConfigureAwait(true);
         response.EnsureSuccessStatusCode();
@@ -3165,6 +3180,12 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
     private void ApplyWebsiteDataStoreConfiguration()
     {
         var proxyConfiguration = NativeWebViewProxyConfigurationResolver.Resolve(_instanceConfiguration.EnvironmentOptions.Proxy);
+        if (proxyConfiguration?.Kind == NativeWebViewProxyKind.Direct)
+        {
+            _directProxyLease = MacOSDirectProxyContextRegistry.Shared.Acquire(_instanceConfiguration);
+            ObjC.SendVoidIntPtr(ConfigurationHandle, NativeSymbols.SelSetWebsiteDataStore, _directProxyLease.Store);
+            return;
+        }
         var dataStoreKind = ResolveWebsiteDataStoreKind(_instanceConfiguration, proxyConfiguration);
         if (dataStoreKind == MacOSWebsiteDataStoreKind.Default)
             return;
@@ -3842,6 +3863,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
     {
         private readonly List<NativeResourceReleaseAction> _releaseActions = [];
         private Action? _managedOwnerRelease;
+        private MacOSDirectProxyContextRegistry.Lease? _directProxyLease;
         private int _state;
 
         internal void Register(
@@ -3866,6 +3888,14 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
             _managedOwnerRelease = release;
         }
 
+        internal void RegisterDirectProxyLease(MacOSDirectProxyContextRegistry.Lease lease)
+        {
+            ArgumentNullException.ThrowIfNull(lease);
+            if (Volatile.Read(ref _state) != 0 || _directProxyLease is not null)
+                throw new InvalidOperationException("A Direct lease can only be registered once before cleanup.");
+            _directProxyLease = lease;
+        }
+
         internal void Commit()
         {
             if (Interlocked.CompareExchange(ref _state, 1, 0) != 0)
@@ -3873,6 +3903,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
 
             _releaseActions.Clear();
             _managedOwnerRelease = null;
+            _directProxyLease = null;
         }
 
         internal NativeResourceCleanupResult Rollback()
@@ -3913,6 +3944,22 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
             }
 
             _managedOwnerRelease = null;
+            var directProxyLease = _directProxyLease;
+            _directProxyLease = null;
+            if (directProxyLease is not null)
+            {
+                try
+                {
+                    if (exceptions is { Count: > 0 })
+                        directProxyLease.RetainAfterCleanupFailure();
+                    else
+                        directProxyLease.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    (exceptions ??= []).Add(exception);
+                }
+            }
             return new NativeResourceCleanupResult(exceptions ?? [], managedOwnerHandleRetained);
         }
 

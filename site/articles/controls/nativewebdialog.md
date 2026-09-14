@@ -71,3 +71,7 @@ dialog.Navigate("https://example.com/dialog");
 - In the current repo implementation, per-instance proxy application is effective on Windows, Linux, and macOS 14+ dialog runtime paths.
 - Print UI and DevTools depend on the platform backend.
 - Unsupported mobile/browser targets return unsupported backend contracts instead of silently no-op behavior.
+
+## Direct connections
+
+Set `InstanceConfiguration.EnvironmentOptions.Proxy = new NativeWebViewProxyOptions { NoProxy = true }` before initialization/showing. Do not combine it with a server, PAC URL, or bypass list. See [NoProxy](../rendering/no-proxy.md) for platform support and profile behavior.

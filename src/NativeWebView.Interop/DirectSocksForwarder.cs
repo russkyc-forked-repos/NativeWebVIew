@@ -1,0 +1,320 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
+
+namespace NativeWebView.Interop;
+
+// Adapted from the issue-19 macOS feasibility spike. TCP CONNECT only; no proxy discovery or TLS interception.
+internal sealed class DirectSocksForwarder : IAsyncDisposable
+{
+    private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+    private readonly CancellationTokenSource _stopping = new();
+    private readonly CancellationTokenSource _tunnelsStopping = new();
+    private readonly ConcurrentDictionary<long, Task> _clients = new();
+    private readonly SemaphoreSlim _slots;
+    private readonly SemaphoreSlim _handshakeSlots;
+    private readonly Func<TcpListener, CancellationToken, ValueTask<TcpClient>> _accept;
+    private readonly byte[] _username;
+    private readonly byte[] _password;
+    private readonly TimeSpan _timeout;
+    private readonly Task _accepting;
+    private readonly object _disposeGate = new();
+    private Task? _disposal;
+    private long _sequence;
+    private int _state; // 0: forwarding, 1: failed but port retained, 2: disposing
+
+    internal DirectSocksForwarder(int maxConnections = 128, TimeSpan? timeout = null,
+        int maxPendingHandshakes = 16,
+        Func<TcpListener, CancellationToken, ValueTask<TcpClient>>? accept = null)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxConnections);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxPendingHandshakes);
+        _slots = new SemaphoreSlim(maxConnections, maxConnections);
+        var handshakes = Math.Min(maxConnections, maxPendingHandshakes);
+        _handshakeSlots = new SemaphoreSlim(handshakes, handshakes);
+        _accept = accept ?? ((listener, token) => listener.AcceptTcpClientAsync(token));
+        _timeout = timeout ?? TimeSpan.FromSeconds(5);
+        Username = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        Password = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        _username = Encoding.ASCII.GetBytes(Username);
+        _password = Encoding.ASCII.GetBytes(Password);
+        try
+        {
+            _listener.ExclusiveAddressUse = true;
+            _listener.Start(maxConnections);
+            Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+            _accepting = AcceptAsync();
+        }
+        catch
+        {
+            _listener.Stop();
+            _slots.Dispose();
+            _handshakeSlots.Dispose();
+            _tunnelsStopping.Dispose();
+            _stopping.Dispose();
+            throw;
+        }
+    }
+
+    internal int Port { get; }
+    internal string Username { get; }
+    internal string Password { get; }
+    internal bool IsHealthy => Volatile.Read(ref _state) == 0 && !_accepting.IsCompleted;
+
+    internal void FailClosed()
+    {
+        lock (_disposeGate)
+        {
+            if (_state != 0)
+                return;
+            Volatile.Write(ref _state, 1);
+            // SOCKS authenticates the client, not the server. Keep the original socket
+            // bound until the native owners release it; never open a port-takeover window.
+            _tunnelsStopping.Cancel();
+        }
+    }
+
+    private async Task AcceptAsync()
+    {
+        try
+        {
+            while (!_stopping.IsCancellationRequested)
+            {
+                TcpClient client;
+                try
+                {
+                    client = await _accept(_listener, _stopping.Token).ConfigureAwait(false);
+                }
+                catch (SocketException) when (!_stopping.IsCancellationRequested)
+                {
+                    FailClosed();
+                    // Resource exhaustion can prevent accepting even just to reject.
+                    // Retry at a bounded rate using the SAME bound listener.
+                    await Task.Delay(TimeSpan.FromMilliseconds(100), _stopping.Token).ConfigureAwait(false);
+                    continue;
+                }
+                if (Volatile.Read(ref _state) != 0 || !_handshakeSlots.Wait(0))
+                {
+                    client.Dispose();
+                    continue;
+                }
+                if (!_slots.Wait(0))
+                {
+                    _handshakeSlots.Release();
+                    client.Dispose();
+                    continue;
+                }
+                var id = Interlocked.Increment(ref _sequence);
+                var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _clients[id] = completion.Task;
+                _ = HandleTrackedAsync(id, client, completion);
+            }
+        }
+        catch (Exception ex) when (ex is SocketException or OperationCanceledException or ObjectDisposedException)
+        {
+            // Final disposal alone releases the listener. Even if the accept loop cannot
+            // continue, do not voluntarily release the endpoint beneath live native owners.
+            FailClosed();
+        }
+    }
+
+    private async Task HandleTrackedAsync(long id, TcpClient client, TaskCompletionSource completion)
+    {
+        var authenticationPending = true;
+        void ReleaseHandshakeSlot()
+        {
+            if (!authenticationPending)
+                return;
+            authenticationPending = false;
+            _handshakeSlots.Release();
+        }
+        try { await HandleAsync(client, ReleaseHandshakeSlot).ConfigureAwait(false); }
+        catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException or ArgumentException)
+        {
+            // Connection failures belong to this tunnel and surface through the socket to WebKit.
+        }
+        finally
+        {
+            client.Dispose();
+            ReleaseHandshakeSlot();
+            _slots.Release();
+            completion.TrySetResult();
+            _clients.TryRemove(id, out _);
+        }
+    }
+
+    private static async Task<byte[]> ReadAsync(NetworkStream stream, int length, CancellationToken token)
+    {
+        var bytes = new byte[length];
+        await stream.ReadExactlyAsync(bytes, token).ConfigureAwait(false);
+        return bytes;
+    }
+
+    private static ValueTask ReplyAsync(NetworkStream stream, byte code, CancellationToken token, IPEndPoint? bound = null)
+    {
+        var address = bound?.Address.GetAddressBytes() ?? new byte[4];
+        var message = new byte[6 + address.Length];
+        message[0] = 5;
+        message[1] = code;
+        message[3] = address.Length == 16 ? (byte)4 : (byte)1;
+        address.CopyTo(message, 4);
+        var port = bound?.Port ?? 0;
+        message[^2] = (byte)(port >> 8);
+        message[^1] = (byte)port;
+        return stream.WriteAsync(message, token);
+    }
+
+    private async Task HandleAsync(TcpClient client, Action authenticated)
+    {
+        using var handshake = CancellationTokenSource.CreateLinkedTokenSource(_tunnelsStopping.Token);
+        using var outbound = new TcpClient();
+        handshake.CancelAfter(_timeout);
+        var token = handshake.Token;
+        var stream = client.GetStream();
+        var hello = await ReadAsync(stream, 2, token).ConfigureAwait(false);
+        if (hello[0] != 5 || hello[1] == 0)
+            return;
+        var methods = await ReadAsync(stream, hello[1], token).ConfigureAwait(false);
+        if (!methods.Contains((byte)2))
+        {
+            await stream.WriteAsync(new byte[] { 5, 255 }, token).ConfigureAwait(false);
+            return;
+        }
+        await stream.WriteAsync(new byte[] { 5, 2 }, token).ConfigureAwait(false);
+        var auth = await ReadAsync(stream, 2, token).ConfigureAwait(false);
+        if (auth[0] != 1 || auth[1] == 0)
+        {
+            await stream.WriteAsync(new byte[] { 1, 1 }, token).ConfigureAwait(false);
+            return;
+        }
+        var suppliedUser = await ReadAsync(stream, auth[1], token).ConfigureAwait(false);
+        byte[]? suppliedPassword = null;
+        bool valid;
+        try
+        {
+            var length = (await ReadAsync(stream, 1, token).ConfigureAwait(false))[0];
+            suppliedPassword = await ReadAsync(stream, length, token).ConfigureAwait(false);
+            valid = CryptographicOperations.FixedTimeEquals(_username, suppliedUser) &
+                CryptographicOperations.FixedTimeEquals(_password, suppliedPassword);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(suppliedUser);
+            if (suppliedPassword is not null)
+                CryptographicOperations.ZeroMemory(suppliedPassword);
+        }
+        await stream.WriteAsync(new byte[] { 1, valid ? (byte)0 : (byte)1 }, token).ConfigureAwait(false);
+        if (!valid)
+            return;
+        authenticated();
+
+        var header = await ReadAsync(stream, 4, token).ConfigureAwait(false);
+        if (header[0] != 5 || header[2] != 0)
+        {
+            await ReplyAsync(stream, 1, token).ConfigureAwait(false);
+            return;
+        }
+        if (header[1] != 1)
+        {
+            await ReplyAsync(stream, 7, token).ConfigureAwait(false);
+            return;
+        }
+        string host;
+        switch (header[3])
+        {
+            case 1: host = new IPAddress(await ReadAsync(stream, 4, token).ConfigureAwait(false)).ToString(); break;
+            case 4: host = new IPAddress(await ReadAsync(stream, 16, token).ConfigureAwait(false)).ToString(); break;
+            case 3:
+                var length = (await ReadAsync(stream, 1, token).ConfigureAwait(false))[0];
+                var name = await ReadAsync(stream, length, token).ConfigureAwait(false);
+                if (length == 0 || name.Any(b => !(b is >= 48 and <= 57 or >= 65 and <= 90 or >= 97 and <= 122 or 45 or 46)))
+                {
+                    await ReplyAsync(stream, 8, token).ConfigureAwait(false);
+                    return;
+                }
+                host = Encoding.ASCII.GetString(name);
+                break;
+            default:
+                await ReplyAsync(stream, 8, token).ConfigureAwait(false);
+                return;
+        }
+        var portBytes = await ReadAsync(stream, 2, token).ConfigureAwait(false);
+        var port = (portBytes[0] << 8) | portBytes[1];
+        handshake.CancelAfter(Timeout.InfiniteTimeSpan);
+        using var connect = CancellationTokenSource.CreateLinkedTokenSource(_tunnelsStopping.Token);
+        connect.CancelAfter(_timeout);
+        try
+        {
+            if (port == 0)
+                throw new ArgumentException("Destination port must be nonzero.");
+            await outbound.ConnectAsync(host, port, connect.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is SocketException or OperationCanceledException or ArgumentException)
+        {
+            var code = (ex as SocketException)?.SocketErrorCode switch
+            {
+                SocketError.ConnectionRefused => (byte)5,
+                SocketError.NetworkUnreachable => (byte)3,
+                SocketError.HostNotFound or SocketError.HostUnreachable => (byte)4,
+                _ => (byte)1,
+            };
+            using var reply = CancellationTokenSource.CreateLinkedTokenSource(_tunnelsStopping.Token);
+            reply.CancelAfter(TimeSpan.FromSeconds(1));
+            await ReplyAsync(stream, code, reply.Token).ConfigureAwait(false);
+            return;
+        }
+        using (var reply = CancellationTokenSource.CreateLinkedTokenSource(_tunnelsStopping.Token))
+        {
+            reply.CancelAfter(TimeSpan.FromSeconds(1));
+            await ReplyAsync(stream, 0, reply.Token, (IPEndPoint)outbound.Client.LocalEndPoint!).ConfigureAwait(false);
+        }
+        client.NoDelay = outbound.NoDelay = true;
+        using var relay = CancellationTokenSource.CreateLinkedTokenSource(_tunnelsStopping.Token);
+        async Task PumpAsync(NetworkStream from, NetworkStream to, Socket destination)
+        {
+            var buffer = new byte[32 * 1024];
+            try
+            {
+                while (true)
+                {
+                    var count = await from.ReadAsync(buffer, relay.Token).ConfigureAwait(false);
+                    if (count == 0)
+                    {
+                        destination.Shutdown(SocketShutdown.Send);
+                        return;
+                    }
+                    await to.WriteAsync(buffer.AsMemory(0, count), relay.Token).ConfigureAwait(false);
+                }
+            }
+            catch { relay.Cancel(); throw; }
+        }
+        // Cache before either pump can observe EOF and half-close the socket.
+        var outboundStream = outbound.GetStream();
+        await Task.WhenAll(PumpAsync(stream, outboundStream, outbound.Client),
+            PumpAsync(outboundStream, stream, client.Client)).ConfigureAwait(false);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        lock (_disposeGate)
+            return new ValueTask(_disposal ??= StopAsync());
+    }
+
+    private async Task StopAsync()
+    {
+        Volatile.Write(ref _state, 2);
+        _tunnelsStopping.Cancel();
+        _stopping.Cancel();
+        _listener.Stop();
+        await _accepting.ConfigureAwait(false);
+        await Task.WhenAll(_clients.Values).ConfigureAwait(false);
+        CryptographicOperations.ZeroMemory(_username);
+        CryptographicOperations.ZeroMemory(_password);
+        _slots.Dispose();
+        _handshakeSlots.Dispose();
+        _tunnelsStopping.Dispose();
+        _stopping.Dispose();
+    }
+}
