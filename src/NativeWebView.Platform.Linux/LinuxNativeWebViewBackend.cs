@@ -248,6 +248,7 @@ public sealed class LinuxNativeWebViewBackend
     public void ApplyInstanceConfiguration(NativeWebViewInstanceConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
+        NativeWebViewProxyPlatformSupportMatrix.ValidateNoProxy(Platform, configuration.EnvironmentOptions.Proxy);
         EnsureNotDisposed();
 
         _instanceConfiguration = configuration.Clone();
@@ -466,6 +467,7 @@ public sealed class LinuxNativeWebViewBackend
         return await NativeWebViewFaviconSupport.DownloadFaviconAsync(
             faviconUri,
             format,
+            (_preparedEnvironmentOptions ?? _instanceConfiguration.EnvironmentOptions).Proxy?.NoProxy == true,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -1225,6 +1227,7 @@ public sealed class LinuxNativeWebViewBackend
             CoreWebView2ControllerOptionsRequested?.Invoke(this, new CoreWebViewControllerOptionsRequestedEventArgs(controllerOptions));
         }
 
+        NativeWebViewProxyPlatformSupportMatrix.ValidateNoProxy(Platform, environmentOptions.Proxy);
         _preparedEnvironmentOptions = environmentOptions.Clone();
         _preparedControllerOptions = controllerOptions.Clone();
     }
@@ -1597,13 +1600,20 @@ public sealed class LinuxNativeWebViewBackend
         var websiteDataManager = LinuxNativeInterop.webkit_web_context_get_website_data_manager(webContext);
         if (websiteDataManager == IntPtr.Zero)
         {
+            if (options.Proxy?.NoProxy == true)
+                throw new InvalidOperationException("WebKitGTK did not provide a website data manager for NoProxy.");
             return;
         }
 
         if (Features.Supports(NativeWebViewFeature.ProxyConfiguration))
         {
             var proxySettings = NativeWebViewLinuxProxySettingsBuilder.Build(options.Proxy);
-            if (proxySettings is not null)
+            if (proxySettings?.NoProxy == true)
+            {
+                LinuxNativeInterop.webkit_website_data_manager_set_network_proxy_settings(
+                    websiteDataManager, LinuxNativeInterop.WebKitNetworkProxyMode.NoProxy, IntPtr.Zero);
+            }
+            else if (proxySettings is not null)
             {
                 using var ignoreHosts = new LinuxUtf8StringArray(proxySettings.IgnoreHosts);
                 var nativeProxySettings = LinuxNativeInterop.webkit_network_proxy_settings_new(

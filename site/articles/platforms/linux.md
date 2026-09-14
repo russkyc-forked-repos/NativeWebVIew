@@ -66,3 +66,7 @@ The embedded control runtime expects GTK3/WebKitGTK on an X11-capable Linux sess
 - Destination selection is handled through `DownloadStarting`; set `DestinationPath` or cancel before WebKitGTK receives the final destination.
 - Progress, completion, cancellation, and failure are surfaced through download item snapshots.
 - Native pause/resume and restart are not advertised in this iteration.
+
+## Direct connections
+
+`Proxy.NoProxy = true` requests direct connections before initialization. See [NoProxy configuration and qualification](../rendering/no-proxy.md) for runtime requirements, macOS storage isolation, and release gates.

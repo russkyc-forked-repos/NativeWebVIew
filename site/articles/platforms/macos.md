@@ -64,3 +64,7 @@ macOS supports composited hosting paths and passthrough decisions for scenarios 
 
 - The embedded backend advertises `NativeWebViewFeature.Downloads` and provides a `WKDownload` delegate bridge with destination, progress, completion/failure and cancellation handling.
 - Use the download manager's events to enforce application policy, including canceling downloads when they are not permitted. Verify native behavior on the deployed macOS/WebKit version.
+
+## Direct connections
+
+`Proxy.NoProxy = true` requests direct connections before initialization. See [NoProxy configuration and qualification](../rendering/no-proxy.md) for runtime requirements, macOS storage isolation, and release gates.

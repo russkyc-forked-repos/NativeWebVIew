@@ -237,6 +237,7 @@ public sealed class WindowsNativeWebViewBackend
     public void ApplyInstanceConfiguration(NativeWebViewInstanceConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
+        NativeWebViewProxyPlatformSupportMatrix.ValidateNoProxy(Platform, configuration.EnvironmentOptions.Proxy);
         EnsureNotDisposed();
 
         _instanceConfiguration = configuration.Clone();
@@ -444,6 +445,7 @@ public sealed class WindowsNativeWebViewBackend
             var svgFavicon = await NativeWebViewFaviconSupport.DownloadFaviconAsync(
                 faviconUri,
                 NativeWebViewFaviconFormat.Original,
+                (_preparedEnvironmentOptions ?? _instanceConfiguration.EnvironmentOptions).Proxy?.NoProxy == true,
                 cancellationToken).ConfigureAwait(false);
             if (svgFavicon is not null)
             {
@@ -1276,6 +1278,7 @@ public sealed class WindowsNativeWebViewBackend
             CoreWebView2ControllerOptionsRequested?.Invoke(this, new CoreWebViewControllerOptionsRequestedEventArgs(controllerOptions));
         }
 
+        NativeWebViewProxyPlatformSupportMatrix.ValidateNoProxy(Platform, environmentOptions.Proxy);
         _preparedEnvironmentOptions = environmentOptions.Clone();
         _preparedControllerOptions = controllerOptions.Clone();
     }
@@ -2220,6 +2223,8 @@ public sealed class WindowsNativeWebViewBackend
         ArgumentNullException.ThrowIfNull(exception);
 
         return RequiresRuntimeEnvironmentOptions(options) &&
+            NativeWebViewProxyConfigurationResolver.Resolve(options?.Proxy) is null &&
+            !NativeWebViewWindowsProxyArgumentsBuilder.HasProxySwitches(options?.AdditionalBrowserArguments) &&
             IsTransientEnvironmentCreationFailure(exception);
     }
 
@@ -2267,15 +2272,19 @@ public sealed class WindowsNativeWebViewBackend
 
     private static CoreWebView2EnvironmentOptions CreateRuntimeEnvironmentOptions(NativeWebViewEnvironmentOptions options)
     {
-        return new CoreWebView2EnvironmentOptions
+        var nativeOptions = new CoreWebView2EnvironmentOptions
         {
             AdditionalBrowserArguments = NativeWebViewWindowsProxyArgumentsBuilder.Merge(
                 options.AdditionalBrowserArguments,
                 options.Proxy),
             AllowSingleSignOnUsingOSPrimaryAccount = options.AllowSingleSignOnUsingOSPrimaryAccount,
-            Language = options.Language,
-            TargetCompatibleBrowserVersion = options.TargetCompatibleBrowserVersion,
         };
+        // Preserve SDK defaults. Clearing TargetCompatibleBrowserVersion makes WebView2 reject otherwise valid proxy options.
+        if (!string.IsNullOrWhiteSpace(options.Language))
+            nativeOptions.Language = options.Language;
+        if (!string.IsNullOrWhiteSpace(options.TargetCompatibleBrowserVersion))
+            nativeOptions.TargetCompatibleBrowserVersion = options.TargetCompatibleBrowserVersion;
+        return nativeOptions;
     }
 
     internal static bool RequiresRuntimeControllerOptions(NativeWebViewControllerOptions? options)

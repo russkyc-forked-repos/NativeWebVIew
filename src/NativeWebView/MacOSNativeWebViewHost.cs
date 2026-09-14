@@ -7,6 +7,7 @@ using System.Text.Json;
 using Avalonia.Platform;
 using Avalonia.Threading;
 using NativeWebView.Core;
+using NativeWebView.Interop;
 
 namespace NativeWebView.Controls;
 
@@ -115,6 +116,8 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
     private static readonly TimeSpan PendingNavigationRetryInterval = TimeSpan.FromMilliseconds(50);
     private static readonly TimeSpan AcceptedNavigationStartTimeout = TimeSpan.FromMilliseconds(750);
     private static readonly HttpClient DownloadHttpClient = new();
+    private static readonly HttpClient DirectDownloadHttpClient = new(new HttpClientHandler { UseProxy = false });
+    private MacOSDirectProxyContextRegistry.Lease? _directProxyLease;
 
     private static class NativeSymbols
     {
@@ -828,6 +831,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
 
     public void Dispose()
     {
+        if (!ObjC.IsMainThread())
+        {
+            MacOSMainThreadDispatch.Post(Dispose);
+            return;
+        }
         if (Interlocked.Exchange(ref _disposeState, 1) != 0)
         {
             return;
@@ -879,6 +887,11 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
     private NativeResourceCleanupCoordinator CreateCleanupCoordinator()
     {
         var cleanup = new NativeResourceCleanupCoordinator();
+        var directProxyLease = _directProxyLease;
+        _directProxyLease = null;
+        // Cleanup actions execute in reverse: release the route after downloads and native owners.
+        if (directProxyLease is not null)
+            cleanup.Register(directProxyLease.Dispose);
         var managedHandle = _managedHandle;
         var configurationHandle = ConfigurationHandle;
         var navigationDelegateHandle = _navigationDelegateHandle;
@@ -2276,7 +2289,7 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
         }
     }
 
-    private static async Task TransferManagedDownloadAsync(
+    private async Task TransferManagedDownloadAsync(
         Uri uri,
         string destinationPath,
         bool allowOverwrite,
@@ -2304,7 +2317,9 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
         }
 
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        using var response = await DownloadHttpClient
+        var downloadClient = _instanceConfiguration.EnvironmentOptions.Proxy?.NoProxy == true
+            ? DirectDownloadHttpClient : DownloadHttpClient;
+        using var response = await downloadClient
             .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
             .ConfigureAwait(true);
         response.EnsureSuccessStatusCode();
@@ -3165,6 +3180,12 @@ internal sealed class MacOSNativeWebViewHost : IDisposable, INativeNavigationSta
     private void ApplyWebsiteDataStoreConfiguration()
     {
         var proxyConfiguration = NativeWebViewProxyConfigurationResolver.Resolve(_instanceConfiguration.EnvironmentOptions.Proxy);
+        if (proxyConfiguration?.Kind == NativeWebViewProxyKind.Direct)
+        {
+            _directProxyLease = MacOSDirectProxyContextRegistry.Shared.Acquire(_instanceConfiguration);
+            ObjC.SendVoidIntPtr(ConfigurationHandle, NativeSymbols.SelSetWebsiteDataStore, _directProxyLease.Store);
+            return;
+        }
         var dataStoreKind = ResolveWebsiteDataStoreKind(_instanceConfiguration, proxyConfiguration);
         if (dataStoreKind == MacOSWebsiteDataStoreKind.Default)
             return;

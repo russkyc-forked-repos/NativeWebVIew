@@ -64,3 +64,7 @@ When WebView2 rejects controller options with an invalid-argument failure, the W
 - Destination selection is handled through `DownloadStarting`; set `DestinationPath` or cancel before the WebView2 deferral completes.
 - Progress, completion, cancellation, failure, and native pause/resume are surfaced through download item snapshots when WebView2 supports the action.
 - Restart is not advertised in this iteration.
+
+## Direct connections
+
+`Proxy.NoProxy = true` requests direct connections before initialization. See [NoProxy configuration and qualification](../rendering/no-proxy.md) for runtime requirements, macOS storage isolation, and release gates.

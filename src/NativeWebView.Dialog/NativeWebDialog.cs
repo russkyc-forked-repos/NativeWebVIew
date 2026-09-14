@@ -300,6 +300,7 @@ public sealed class NativeWebDialog : IDisposable
 
     private void ApplyInstanceConfigurationToBackend()
     {
+        NativeWebViewProxyPlatformSupportMatrix.ValidateNoProxy(Platform, _instanceConfiguration.EnvironmentOptions.Proxy);
         if (_controller.TryGetBackend<INativeWebViewInstanceConfigurationTarget>(out var target))
         {
             target.ApplyInstanceConfiguration(_instanceConfiguration.Clone());

@@ -140,6 +140,7 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
     public void ApplyInstanceConfiguration(NativeWebViewInstanceConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
+        NativeWebViewProxyPlatformSupportMatrix.ValidateNoProxy(Platform, configuration.EnvironmentOptions.Proxy);
         if (!configuration.ControllerOptions.IsJavaScriptEnabled)
             throw new NotSupportedException("Disabling page JavaScript is not supported by the macOS dialog backend. Use an embedded WebView.");
         _instanceConfiguration = configuration.Clone();
@@ -535,6 +536,11 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
 
     public void Dispose()
     {
+        if (_useNative && !ObjC.IsMainThread())
+        {
+            MacOSMainThreadDispatch.Post(Dispose);
+            return;
+        }
         if (_disposed)
         {
             return;
@@ -572,8 +578,12 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
             _contentViewHandle = IntPtr.Zero;
         }
 
+        _directProxyLease?.Dispose();
+        _directProxyLease = null;
         _isVisible = false;
     }
+
+    private MacOSDirectProxyContextRegistry.Lease? _directProxyLease;
 
     private void EnsureWindowCreated(NativeWebDialogShowOptions? options)
     {
@@ -587,74 +597,85 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
             return;
         }
 
-        var normalized = options ?? new NativeWebDialogShowOptions();
-        var width = normalized.Width > 0 ? normalized.Width : 1024;
-        var height = normalized.Height > 0 ? normalized.Height : 768;
-        var left = normalized.Left;
-        var top = normalized.Top;
-
-        var windowStyleMask =
-            NSWindowStyleMaskTitled |
-            NSWindowStyleMaskClosable |
-            NSWindowStyleMaskMiniaturizable |
-            NSWindowStyleMaskResizable;
-
-        var frame = new CGRect(new CGPoint(left, top), new CGSize(width, height));
-
-        _windowHandle = ObjC.SendIntPtrCGRectNUIntNIntBool(
-            ObjC.SendIntPtr(NativeSymbols.NSWindowClass, NativeSymbols.SelAlloc),
-            NativeSymbols.SelInitWithContentRectStyleMaskBackingDefer,
-            frame,
-            windowStyleMask,
-            NSBackingStoreBuffered,
-            false);
-
-        if (_windowHandle == IntPtr.Zero)
+        try
         {
-            throw new InvalidOperationException("Failed to create NSWindow for NativeWebDialog.");
+            var normalized = options ?? new NativeWebDialogShowOptions();
+            var width = normalized.Width > 0 ? normalized.Width : 1024;
+            var height = normalized.Height > 0 ? normalized.Height : 768;
+            var left = normalized.Left;
+            var top = normalized.Top;
+
+            var windowStyleMask =
+                NSWindowStyleMaskTitled |
+                NSWindowStyleMaskClosable |
+                NSWindowStyleMaskMiniaturizable |
+                NSWindowStyleMaskResizable;
+
+            var frame = new CGRect(new CGPoint(left, top), new CGSize(width, height));
+
+            _windowHandle = ObjC.SendIntPtrCGRectNUIntNIntBool(
+                ObjC.SendIntPtr(NativeSymbols.NSWindowClass, NativeSymbols.SelAlloc),
+                NativeSymbols.SelInitWithContentRectStyleMaskBackingDefer,
+                frame,
+                windowStyleMask,
+                NSBackingStoreBuffered,
+                false);
+
+            if (_windowHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Failed to create NSWindow for NativeWebDialog.");
+            }
+
+            ObjC.SendVoidBool(_windowHandle, NativeSymbols.SelSetReleasedWhenClosed, false);
+
+            _contentViewHandle = ObjC.SendIntPtr(_windowHandle, NativeSymbols.SelContentView);
+            if (_contentViewHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Failed to resolve NSWindow contentView.");
+            }
+
+            _configurationHandle = ObjC.SendIntPtr(ObjC.SendIntPtr(NativeSymbols.WKWebViewConfigurationClass, NativeSymbols.SelAlloc), NativeSymbols.SelInit);
+            if (_configurationHandle == IntPtr.Zero)
+                throw new InvalidOperationException("Failed to create WKWebViewConfiguration for NativeWebDialog.");
+            ApplyProxyConfiguration();
+            _webViewHandle = ObjC.SendIntPtrCGRectIntPtr(
+                ObjC.SendIntPtr(NativeSymbols.WKWebViewClass, NativeSymbols.SelAlloc),
+                NativeSymbols.SelInitWithFrameConfiguration,
+                CGRect.Zero,
+                _configurationHandle);
+
+            if (_webViewHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Failed to create WKWebView for NativeWebDialog.");
+            }
+
+            ObjC.SendVoidIntPtr(_contentViewHandle, NativeSymbols.SelAddSubview, _webViewHandle);
+            ObjC.SendVoidNUInt(_webViewHandle, NativeSymbols.SelSetAutoresizingMask, NSViewWidthSizable | NSViewHeightSizable);
+            var contentBounds = ObjC.SendCGRect(_contentViewHandle, NativeSymbols.SelBounds);
+            ObjC.SendVoidCGRect(_webViewHandle, NativeSymbols.SelSetFrame, contentBounds);
+
+            if (!string.IsNullOrWhiteSpace(UserAgentString))
+            {
+                var userAgentHandle = CreateNSString(UserAgentString);
+                ObjC.SendVoidIntPtr(_webViewHandle, NativeSymbols.SelSetCustomUserAgent, userAgentHandle);
+            }
+
+            if (ZoomFactor > 0 &&
+                ObjC.SendBoolIntPtr(_webViewHandle, NativeSymbols.SelRespondsToSelector, NativeSymbols.SelSetPageZoom))
+            {
+                ObjC.SendVoidDouble(_webViewHandle, NativeSymbols.SelSetPageZoom, ZoomFactor);
+            }
+
+            if (_currentUrl is { IsAbsoluteUri: true } initialUri)
+            {
+                LoadUrl(initialUri);
+            }
         }
-
-        ObjC.SendVoidBool(_windowHandle, NativeSymbols.SelSetReleasedWhenClosed, false);
-
-        _contentViewHandle = ObjC.SendIntPtr(_windowHandle, NativeSymbols.SelContentView);
-        if (_contentViewHandle == IntPtr.Zero)
+        catch (Exception original)
         {
-            throw new InvalidOperationException("Failed to resolve NSWindow contentView.");
-        }
-
-        _configurationHandle = ObjC.SendIntPtr(ObjC.SendIntPtr(NativeSymbols.WKWebViewConfigurationClass, NativeSymbols.SelAlloc), NativeSymbols.SelInit);
-        ApplyProxyConfiguration();
-        _webViewHandle = ObjC.SendIntPtrCGRectIntPtr(
-            ObjC.SendIntPtr(NativeSymbols.WKWebViewClass, NativeSymbols.SelAlloc),
-            NativeSymbols.SelInitWithFrameConfiguration,
-            CGRect.Zero,
-            _configurationHandle);
-
-        if (_webViewHandle == IntPtr.Zero)
-        {
-            throw new InvalidOperationException("Failed to create WKWebView for NativeWebDialog.");
-        }
-
-        ObjC.SendVoidIntPtr(_contentViewHandle, NativeSymbols.SelAddSubview, _webViewHandle);
-        ObjC.SendVoidNUInt(_webViewHandle, NativeSymbols.SelSetAutoresizingMask, NSViewWidthSizable | NSViewHeightSizable);
-        var contentBounds = ObjC.SendCGRect(_contentViewHandle, NativeSymbols.SelBounds);
-        ObjC.SendVoidCGRect(_webViewHandle, NativeSymbols.SelSetFrame, contentBounds);
-
-        if (!string.IsNullOrWhiteSpace(UserAgentString))
-        {
-            var userAgentHandle = CreateNSString(UserAgentString);
-            ObjC.SendVoidIntPtr(_webViewHandle, NativeSymbols.SelSetCustomUserAgent, userAgentHandle);
-        }
-
-        if (ZoomFactor > 0 &&
-            ObjC.SendBoolIntPtr(_webViewHandle, NativeSymbols.SelRespondsToSelector, NativeSymbols.SelSetPageZoom))
-        {
-            ObjC.SendVoidDouble(_webViewHandle, NativeSymbols.SelSetPageZoom, ZoomFactor);
-        }
-
-        if (_currentUrl is { IsAbsoluteUri: true } initialUri)
-        {
-            LoadUrl(initialUri);
+            try { Dispose(); }
+            catch (Exception cleanup) { original.Data["NativeWebDialog.InitializationCleanup"] = cleanup; }
+            throw;
         }
     }
 
@@ -714,6 +735,12 @@ public sealed class MacOSNativeWebDialogBackend : INativeWebDialogBackend, INati
     private void ApplyProxyConfiguration()
     {
         var proxyConfiguration = NativeWebViewProxyConfigurationResolver.Resolve(_instanceConfiguration.EnvironmentOptions.Proxy);
+        if (proxyConfiguration?.Kind == NativeWebViewProxyKind.Direct)
+        {
+            _directProxyLease = MacOSDirectProxyContextRegistry.Shared.Acquire(_instanceConfiguration);
+            ObjC.SendVoidIntPtr(_configurationHandle, NativeSymbols.SelSetWebsiteDataStore, _directProxyLease.Store);
+            return;
+        }
         if (proxyConfiguration is null)
         {
             return;

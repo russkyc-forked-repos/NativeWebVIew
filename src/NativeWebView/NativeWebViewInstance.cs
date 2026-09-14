@@ -27,6 +27,8 @@ public sealed class NativeWebViewInstance : IDisposable
         try
         {
             ApplyInstanceConfigurationCore(instanceConfiguration ?? InstanceConfiguration, validateLifecycle: false);
+            Controller.CoreWebView2EnvironmentRequested += OnEnvironmentOptionsRequested;
+            Controller.CoreWebView2ControllerOptionsRequested += OnControllerOptionsRequested;
         }
         catch (Exception constructionException)
         {
@@ -47,25 +49,65 @@ public sealed class NativeWebViewInstance : IDisposable
 
     internal NativeWebViewInstanceConfiguration InstanceConfiguration { get; private set; }
 
+    internal event EventHandler<CoreWebViewEnvironmentRequestedEventArgs>? EnvironmentOptionsRequested;
+    internal event EventHandler<CoreWebViewControllerOptionsRequestedEventArgs>? ControllerOptionsRequested;
+
     internal MacOSNativeWebViewHost? MacOSHost { get; set; }
 
     internal INativeNavigationState? NativeNavigationState { get; set; }
 
-    private bool? _finalizedMacOSJavaScriptEnabled;
+    private NativeWebViewEnvironmentOptions? _finalizedMacOSEnvironmentOptions;
+    private NativeWebViewControllerOptions? _finalizedMacOSControllerOptions;
+
+    internal NativeWebViewInstanceConfiguration PrepareMacOSHostConfiguration()
+    {
+        // The macOS backend finalizes options synchronously. Never create a native store
+        // while option callbacks are still pending, or block the AppKit thread waiting for them.
+        var initialization = Controller.InitializeAsync();
+        if (!initialization.IsCompleted)
+            throw new InvalidOperationException("Complete initialization before attaching the macOS native host.");
+        initialization.GetAwaiter().GetResult();
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        return GetMacOSHostConfiguration();
+    }
 
     internal NativeWebViewInstanceConfiguration GetMacOSHostConfiguration()
     {
         var configuration = InstanceConfiguration.Clone();
-        if (_finalizedMacOSJavaScriptEnabled is { } enabled)
-            configuration.ControllerOptions.IsJavaScriptEnabled = enabled;
+        if (_finalizedMacOSEnvironmentOptions is { } environment)
+            configuration.EnvironmentOptions = environment.Clone();
+        if (_finalizedMacOSControllerOptions is { } controller)
+            configuration.ControllerOptions = controller.Clone();
         return configuration;
     }
 
-    internal void ApplyFinalizedMacOSJavaScriptPolicy(bool enabled)
+    private void OnEnvironmentOptionsRequested(object? sender, CoreWebViewEnvironmentRequestedEventArgs e)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
-        _finalizedMacOSJavaScriptEnabled = enabled;
-        MacOSHost?.SetPageJavaScriptEnabled(enabled);
+        // Seed once for the shared instance, then let every live presenter's handlers
+        // contribute before validating and retaining the final configuration.
+        InstanceConfiguration.ApplyEnvironmentOptions(e.Options);
+        EnvironmentOptionsRequested?.Invoke(sender, e);
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        if (Platform == NativeWebViewPlatform.MacOS)
+        {
+            NativeWebViewProxyPlatformSupportMatrix.ValidateNoProxy(Platform, e.Options.Proxy);
+            _ = NativeWebViewProxyConfigurationResolver.Resolve(e.Options.Proxy);
+            _finalizedMacOSEnvironmentOptions = e.Options.Clone();
+        }
+    }
+
+    private void OnControllerOptionsRequested(object? sender, CoreWebViewControllerOptionsRequestedEventArgs e)
+    {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        InstanceConfiguration.ApplyControllerOptions(e.Options);
+        ControllerOptionsRequested?.Invoke(sender, e);
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        if (Platform == NativeWebViewPlatform.MacOS)
+        {
+            _finalizedMacOSControllerOptions = e.Options.Clone();
+            MacOSHost?.SetPageJavaScriptEnabled(e.Options.IsJavaScriptEnabled);
+        }
     }
 
     internal long ActivePresenterId
@@ -112,6 +154,10 @@ public sealed class NativeWebViewInstance : IDisposable
         }
 
         _isDisposed = true;
+        Controller.CoreWebView2EnvironmentRequested -= OnEnvironmentOptionsRequested;
+        Controller.CoreWebView2ControllerOptionsRequested -= OnControllerOptionsRequested;
+        EnvironmentOptionsRequested = null;
+        ControllerOptionsRequested = null;
         DetachConfigurationEvents(InstanceConfiguration);
         _configurationBeforeScriptMutation = null;
         AttachDisposedConfigurationGuard(InstanceConfiguration);
@@ -136,6 +182,7 @@ public sealed class NativeWebViewInstance : IDisposable
             ValidateConfigurationCanChange();
 
         var clone = instanceConfiguration.Clone();
+        NativeWebViewProxyPlatformSupportMatrix.ValidateNoProxy(Platform, clone.EnvironmentOptions.Proxy);
         ApplyConfigurationToBackend(clone, InstanceConfiguration);
 
         DetachConfigurationEvents(InstanceConfiguration);

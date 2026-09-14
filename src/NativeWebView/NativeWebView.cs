@@ -126,8 +126,6 @@ public class NativeWebView : NativeControlHost, IDisposable
         _lastZoomFactor = _controller.ZoomFactor;
         _macOSHost = _instance.MacOSHost;
         Focusable = true;
-        _controller.CoreWebView2EnvironmentRequested += OnCoreWebView2EnvironmentRequestedInternal;
-        _controller.CoreWebView2ControllerOptionsRequested += OnCoreWebView2ControllerOptionsRequestedInternal;
         AttachControllerEventForwarders();
         AttachMacOSHostEventForwarders();
     }
@@ -568,8 +566,8 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.DownloadStarted += ForwardDownloadStarted;
         _controller.DownloadChanged += ForwardDownloadChanged;
         _controller.DownloadCompleted += ForwardDownloadCompleted;
-        _controller.CoreWebView2EnvironmentRequested += ForwardCoreWebView2EnvironmentRequested;
-        _controller.CoreWebView2ControllerOptionsRequested += ForwardCoreWebView2ControllerOptionsRequested;
+        _instance.EnvironmentOptionsRequested += ForwardCoreWebView2EnvironmentRequested;
+        _instance.ControllerOptionsRequested += ForwardCoreWebView2ControllerOptionsRequested;
         _controller.FaviconChanged += ForwardFaviconChanged;
         _controller.StatusTextChanged += ForwardStatusTextChanged;
         _controller.ZoomFactorChanged += ForwardZoomFactorChanged;
@@ -597,8 +595,8 @@ public class NativeWebView : NativeControlHost, IDisposable
         _controller.DownloadStarted -= ForwardDownloadStarted;
         _controller.DownloadChanged -= ForwardDownloadChanged;
         _controller.DownloadCompleted -= ForwardDownloadCompleted;
-        _controller.CoreWebView2EnvironmentRequested -= ForwardCoreWebView2EnvironmentRequested;
-        _controller.CoreWebView2ControllerOptionsRequested -= ForwardCoreWebView2ControllerOptionsRequested;
+        _instance.EnvironmentOptionsRequested -= ForwardCoreWebView2EnvironmentRequested;
+        _instance.ControllerOptionsRequested -= ForwardCoreWebView2ControllerOptionsRequested;
         _controller.FaviconChanged -= ForwardFaviconChanged;
         _controller.StatusTextChanged -= ForwardStatusTextChanged;
         _controller.ZoomFactorChanged -= ForwardZoomFactorChanged;
@@ -796,14 +794,16 @@ public class NativeWebView : NativeControlHost, IDisposable
     private void ForwardDownloadCompleted(object? sender, NativeWebViewDownloadItemEventArgs e) =>
         _downloadCompleted?.Invoke(sender, e);
 
-    private void ForwardCoreWebView2EnvironmentRequested(object? sender, CoreWebViewEnvironmentRequestedEventArgs e) =>
-        _coreWebView2EnvironmentRequested?.Invoke(sender, e);
+    private void ForwardCoreWebView2EnvironmentRequested(object? sender, CoreWebViewEnvironmentRequestedEventArgs e)
+    {
+        if (!_isDisposed)
+            _coreWebView2EnvironmentRequested?.Invoke(sender, e);
+    }
 
     private void ForwardCoreWebView2ControllerOptionsRequested(object? sender, CoreWebViewControllerOptionsRequestedEventArgs e)
     {
-        _coreWebView2ControllerOptionsRequested?.Invoke(sender, e);
-        if (_controller.Platform == NativeWebViewPlatform.MacOS)
-            _instance.ApplyFinalizedMacOSJavaScriptPolicy(e.Options.IsJavaScriptEnabled);
+        if (!_isDisposed)
+            _coreWebView2ControllerOptionsRequested?.Invoke(sender, e);
     }
 
     private void ForwardFaviconChanged(object? sender, NativeWebViewFaviconChangedEventArgs e) =>
@@ -1152,7 +1152,7 @@ public class NativeWebView : NativeControlHost, IDisposable
 
     protected override IPlatformHandle CreateNativeControlCore(IPlatformHandle parent)
     {
-        if (_instance.IsDisposed)
+        if (_isDisposed || _instance.IsDisposed)
         {
             return base.CreateNativeControlCore(parent);
         }
@@ -1175,7 +1175,7 @@ public class NativeWebView : NativeControlHost, IDisposable
             _controller.TryGetDownloadManager(out var downloadManager);
             _macOSHost = new MacOSNativeWebViewHost(
                 parent,
-                _instance.GetMacOSHostConfiguration(),
+                PrepareMacOSHostConfiguration(),
                 downloadManager as NativeWebViewDownloadManager);
             _instance.MacOSHost = _macOSHost;
             _instance.NativeNavigationState = _macOSHost;
@@ -1389,8 +1389,6 @@ public class NativeWebView : NativeControlHost, IDisposable
 
         DetachMacOSHostEventForwarders();
         DetachControllerEventForwarders();
-        _controller.CoreWebView2EnvironmentRequested -= OnCoreWebView2EnvironmentRequestedInternal;
-        _controller.CoreWebView2ControllerOptionsRequested -= OnCoreWebView2ControllerOptionsRequestedInternal;
 
         if (_ownsInstance)
         {
@@ -1446,14 +1444,14 @@ public class NativeWebView : NativeControlHost, IDisposable
         return false;
     }
 
-    private void OnCoreWebView2EnvironmentRequestedInternal(object? sender, CoreWebViewEnvironmentRequestedEventArgs e)
+    internal NativeWebViewInstanceConfiguration PrepareMacOSHostConfiguration()
     {
-        _instance.InstanceConfiguration.ApplyEnvironmentOptions(e.Options);
-    }
-
-    private void OnCoreWebView2ControllerOptionsRequestedInternal(object? sender, CoreWebViewControllerOptionsRequestedEventArgs e)
-    {
-        _instance.InstanceConfiguration.ApplyControllerOptions(e.Options);
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        var configuration = _instance.PrepareMacOSHostConfiguration();
+        // Initialization invokes application code, which can close this presenter
+        // without disposing its shared instance. Abort before allocating native owners.
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
+        return configuration;
     }
 
     private void ApplyRenderModeState(bool forceRefresh)
